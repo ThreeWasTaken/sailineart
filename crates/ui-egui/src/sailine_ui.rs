@@ -276,10 +276,10 @@ pub fn end_width_drag(app: &mut PhotocraftApp, point: [f64; 2]) {
     };
     let _ =
         app.run("linework.setPointWidth", json!({"layer": s.layer.0, "path": s.path, "point": s.point, "factor": factor, "coalesce": "sailine-width-drag"}));
-    if drag.moved {
-        if let Some(base) = path_width(app, s) {
-            app.ui.tool_options.sailine_width = (factor * base).clamp(0.1, 1000.0);
-        }
+    if drag.moved
+        && let Some(base) = path_width(app, s)
+    {
+        app.ui.tool_options.sailine_width = (factor * base).clamp(0.1, 1000.0);
     }
 }
 

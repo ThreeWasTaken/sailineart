@@ -3,6 +3,17 @@
 SaiLine creates an open interpolated vector stroke through a series of clicked points.
 Select **SaiLine Tool** as its own toolbar slot beside the Pen tools.
 
+Its Bézier handles respond to neighboring segment lengths: longer spans pull a wider arc,
+shorter turns stay tighter, and nearly coincident anchors converge toward a sharp corner.
+The extra pull fades continuously as neighboring segments approach equal length.
+On a long-to-short turn, the outgoing handle follows the short segment more closely while keeping
+its short handle length; the incoming handle keeps the preceding sweep broad. A shorter final
+return continues a gentle arc, while a long final span retains its natural endpoint tangent.
+The endpoint correction fades in with the length difference and fades out near a right-angle
+turn. Near an opposing turn, the outgoing handle contracts continuously toward zero.
+For a three-point arc with comparable neighboring spans, the free start and end continue the
+turn gently so the curve bows toward the outside from both endpoints.
+
 - Click the canvas to place anchors. Moving the pointer previews the next point.
 - Around the last anchor, the pointer also controls the curve: its direction changes the tangent
   angle, while its distance changes how rounded the preceding segment is.

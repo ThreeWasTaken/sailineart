@@ -18,6 +18,13 @@ robustesse du rendu lorsque plusieurs tracés vivent sur le même calque.
 - Calque `LineworkLayer` persistant, plusieurs tracés indépendants par calque et identifiants stables.
 - Sauvegarde/rechargement `.pcraft` des points, couleurs, largeurs et facteurs de largeur.
 - Interpolation Bézier passant par les points, avec gestion des points proches ou superposés.
+- Tangentes asymétriques selon la longueur des segments voisins : les grands arcs restent souples,
+  les virages courts restent serrés, et les points confondus gardent un angle dur. Au retour d'un
+  long segment vers un court, la poignée sortante s'oriente vers le court segment sans reprendre
+  la longueur de la longue poignée entrante ;
+  l'extrémité libre prolonge légèrement la courbure uniquement si le dernier segment est plus court.
+- La force supplémentaire du grand segment décroît progressivement quand deux longueurs se
+  rejoignent : déplacer un point juste au-delà de l'égalité ne fait plus sauter la courbe voisine.
 - Validation finale sans conserver le curseur comme poignée : deux points validés restent droits.
 - Sélection simple, Shift-clic additif/retrait, sélection rectangulaire temporaire avec Shift-glisser.
 - Surbrillance au survol et marqueurs ronds pour les points SaiLine.
@@ -57,6 +64,27 @@ est reconstruit à chaque mouvement. Aucun doublon de tracé ne doit être affic
 - Les facteurs de largeur extrêmes doivent rester stables : éviter auto-intersections, pointes,
   poches noires ou discontinuités entre sections.
 - Les points superposés doivent conserver le comportement d’angle dur validé précédemment.
+- L’interpolation doit encore être comparée visuellement à SAI sur plusieurs tracés réels ; le
+  quadrillage fourni a servi à ajuster les grands arcs et les retours courts. Sur la comparaison
+  violette du 17 octobre, le grand arc inférieur rejoint largement l'épaisseur du trait SAI ;
+  la verticale gauche reste décalée d'environ 4 à 6 pixels au milieu. Éviter de régler ce seul
+  exemple au détriment des autres courbes. Une seconde référence quadrillée montre un écart sur
+  la montée depuis le premier point (bleu à droite du centre rouge) et sur le long segment final
+  inférieur (bleu légèrement plus bas). La largeur rouge variable rend la ligne centrale
+  approximative. Une troisième référence SAI à trait fin confirme que la correction d'extrémité
+  des retours courts faussait une longue diagonale finale ; elle ne s'applique désormais plus à
+  ce cas. Le dernier essai montre aussi une boucle vers l'extérieur sur un retour très court ; la
+  poignée sortante a été réorientée sans augmenter sa longueur. Revoir visuellement ce tracé après
+  compilation et continuer les comparaisons.
+- La référence « 8 cases puis 7 ou 8 cases » a mis en évidence une discontinuité au passage des
+  longueurs égales. Le calcul est désormais continu. Des essais systématiques ont révélé et corrigé
+  deux autres sauts : l'activation de la poignée spéciale à l'extrémité et l'annulation de deux
+  directions opposées dans un demi-tour. Les courbes restent à vérifier à la main dans l'application.
+- Sur la comparaison des trois formes en L, SAI commence l'arc en montant et revient au dernier
+  point depuis l'extérieur, tandis que SaiLine restait trop droit aux deux extrémités des cas 2
+  et 3. Les tangentes libres prolongent maintenant légèrement le virage quand les segments sont
+  de longueurs comparables, avec extinction progressive pour les cas courts, très déséquilibrés
+  ou presque inversés. Vérifier visuellement les trois formes après recompilation.
 - La pression réelle du stylet n’est pas encore reliée à `width_factor` ; la largeur est éditée
   manuellement.
 - La courbure globale réglable, la transformation Ctrl+T de points, le copier/coller, la scission,
