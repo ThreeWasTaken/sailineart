@@ -930,6 +930,7 @@ pub(crate) fn draw_handle(painter: &egui::Painter, anchor: Pos2, handle: Pos2, a
 
 /// Work path / active shape path outlines, anchors, and the pen path in progress.
 pub fn draw_overlay(app: &PhotocraftApp, painter: &egui::Painter, xf: &ViewXform, doc: &Document) {
+    crate::sailine_ui::draw(app, painter, xf);
     let tool = app.ui.tool;
     let vector_tool = matches!(tool, Tool::Pen | Tool::FreeformPen | Tool::CurvaturePen | Tool::PathSelection) || is_shape_tool(tool);
     let accent = Tokens::get(painter.ctx()).accent;
@@ -1033,6 +1034,10 @@ pub fn draw_overlay(app: &PhotocraftApp, painter: &egui::Painter, xf: &ViewXform
 
 /// Options bar for vector tools; false for other tools.
 pub fn options_bar(app: &mut PhotocraftApp, ui: &mut egui::Ui, tool: Tool) -> bool {
+    if matches!(tool, Tool::SaiLine | Tool::SaiLineWidth) {
+        crate::sailine_ui::options(app, ui);
+        return true;
+    }
     if !(is_shape_tool(tool)
         || matches!(
             tool,

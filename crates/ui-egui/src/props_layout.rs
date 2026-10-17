@@ -25,6 +25,7 @@ pub fn kind_icon(content: &LayerContent) -> &'static str {
         LayerContent::Fill(_) => "paint-bucket",
         LayerContent::Text(_) => "type",
         LayerContent::Shape(_) => "pentagon",
+        LayerContent::Linework(_) => "spline",
         LayerContent::Smart(_) => "app-window",
         LayerContent::Raster(_) => "image",
     }
@@ -131,6 +132,7 @@ pub fn quick_actions(content: &LayerContent) -> &'static [(&'static str, &'stati
             ("Rasterize Type", "type.rasterizeTypeLayer"),
         ],
         LayerContent::Shape(_) => &[("Rasterize Shape", "layer.rasterize.shape"), ("Convert to Smart Object", "layer.smartObjects.convertToSmartObject")],
+        LayerContent::Linework(_) => &[("Rasterize Linework", "layer.rasterize.shape")],
         LayerContent::Smart(_) => &[
             ("Edit Contents", "layer.smartObjects.editContents"),
             ("Convert to Layers", "layer.smartObjects.convertToLayers"),

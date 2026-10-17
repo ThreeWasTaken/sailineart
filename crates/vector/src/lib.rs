@@ -21,6 +21,7 @@
 
 pub mod edit;
 pub mod flatten;
+pub mod linework;
 pub mod map;
 pub mod raster;
 pub mod shapes;

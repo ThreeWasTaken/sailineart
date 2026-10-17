@@ -14,6 +14,7 @@ pub mod analysis;
 pub mod blend_if;
 pub mod comps;
 pub mod effects;
+pub mod linework;
 pub mod mode;
 pub mod pattern;
 pub mod slices;
@@ -35,6 +36,7 @@ pub use effects::{
     Bevel, BevelContour, BevelStyle, BevelTechnique, BevelTexture, Contour, Effect, FxCommon, FxPaint, GlobalLight, Glow, GlowSource, GlowTechnique, Gradient,
     GradientStyle, Satin, Shadow, StrokeFx, StrokePosition,
 };
+pub use linework::{LineworkLayer, LineworkPath, LineworkPoint};
 pub use mode::{ColorTable, Duotone, DuotoneInk, StackMode};
 pub use pattern::Pattern;
 pub use photocraft_color::{BlendMode, Color, ColorMode, PixelFormat, SampleType};
@@ -586,6 +588,7 @@ pub enum LayerContent {
     Fill(Fill),
     Text(TextLayer),
     Shape(ShapeLayer),
+    Linework(LineworkLayer),
     Smart(SmartObject),
 }
 
@@ -598,6 +601,7 @@ impl LayerContent {
             LayerContent::Fill(_) => "Fill",
             LayerContent::Text(_) => "Type",
             LayerContent::Shape(_) => "Shape",
+            LayerContent::Linework(_) => "Linework",
             LayerContent::Smart(_) => "Smart Object",
         }
     }
@@ -722,6 +726,7 @@ impl Layer {
             LayerContent::Raster(s) => Some(s),
             LayerContent::Text(t) => t.cache.as_ref(),
             LayerContent::Shape(s) => s.cache.as_ref(),
+            LayerContent::Linework(s) => s.cache.as_ref(),
             LayerContent::Smart(s) => s.cache.as_ref(),
             _ => None,
         }
@@ -741,6 +746,9 @@ impl Layer {
     fn reassign_ids(&mut self) {
         self.id = LayerId::fresh();
         self.psd_id = None;
+        if let LayerContent::Linework(linework) = &mut self.content {
+            *linework = linework.duplicate();
+        }
         if let Some(ch) = self.children_mut() {
             for c in ch {
                 c.reassign_ids();

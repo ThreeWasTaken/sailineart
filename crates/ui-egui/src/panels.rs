@@ -37,6 +37,7 @@ const TOOL_SECTIONS: &[&[&[Tool]]] = &[
     ],
     &[
         &[Tool::Pen, Tool::FreeformPen, Tool::CurvaturePen, Tool::AddAnchorPoint, Tool::DeleteAnchorPoint, Tool::ConvertPoint],
+        &[Tool::SaiLine, Tool::SaiLineWidth],
         &[Tool::Type, Tool::VerticalType, Tool::VerticalTypeMask, Tool::HorizontalTypeMask],
         &[Tool::PathSelection, Tool::DirectSelection],
         &[Tool::Rectangle, Tool::EllipseShape, Tool::Triangle, Tool::Polygon, Tool::Line, Tool::CustomShape],
@@ -968,6 +969,10 @@ pub fn options_bar(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
                     return;
                 }
                 let tool = app.ui.tool;
+                if matches!(tool, Tool::SaiLine | Tool::SaiLineWidth) {
+                    crate::sailine_ui::options(app, ui);
+                    return;
+                }
                 // The options bar shows the active tool's brush: switch it in before drawing the
                 // chip, so a tool change swaps the brush with it (Photoshop keeps one per tool).
                 crate::paint_mouse::sync_tool_brush(app);
@@ -2367,6 +2372,7 @@ fn layers(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
                         LayerContent::Adjustment(_) | LayerContent::Fill(_) => "adjustment",
                         LayerContent::Text(_) => "type",
                         LayerContent::Shape(_) => "shape",
+                        LayerContent::Linework(_) => "linework",
                         LayerContent::Smart(_) => "smart",
                         LayerContent::Group(_) => "",
                     };

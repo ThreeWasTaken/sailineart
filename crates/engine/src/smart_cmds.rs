@@ -657,6 +657,17 @@ fn shift_layer(l: &mut Layer, dx: i32, dy: i32) {
                 *c = mv(c);
             }
         }
+        LayerContent::Linework(linework) => {
+            for path in &mut linework.paths {
+                for point in &mut path.points {
+                    point.position[0] += dx as f64;
+                    point.position[1] += dy as f64;
+                }
+            }
+            if let Some(c) = &mut linework.cache {
+                *c = mv(c);
+            }
+        }
         LayerContent::Smart(sm) => shift_smart(sm, dx, dy),
         LayerContent::Group(g) => g.children.iter_mut().for_each(|c| shift_layer(c, dx, dy)),
         LayerContent::Adjustment(_) | LayerContent::Fill(_) => {}

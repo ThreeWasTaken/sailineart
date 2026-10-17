@@ -206,6 +206,7 @@ mod tile_overlay;
 mod timeline_ui;
 mod titlebar;
 pub use titlebar::{Caption, CaptionFamily, CaptionIcon, CaptionIcons, CaptionStyle, RenderIconFn};
+mod sailine_ui;
 pub mod tone;
 mod tool_cursor;
 pub mod tool_feedback;
@@ -1710,6 +1711,7 @@ impl eframe::App for PhotocraftApp {
         if self.ui.pen.as_ref().is_some_and(|p| !p.drawn_with(self.ui.tool)) {
             vector_ui::pen_commit(self, false);
         }
+        sailine_ui::sync(self);
         transform_tool::end_if_left(self);
         shape_stroke_ui::sync_editor(self, ctx);
         self.collect_screenshots(ctx);

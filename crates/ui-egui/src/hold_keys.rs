@@ -87,6 +87,8 @@ pub fn cmd_moves(t: Tool) -> bool {
                 | Tool::Pen
                 | Tool::FreeformPen
                 | Tool::CurvaturePen
+                | Tool::SaiLine
+                | Tool::SaiLineWidth
                 | Tool::AddAnchorPoint
                 | Tool::DeleteAnchorPoint
                 | Tool::ConvertPoint

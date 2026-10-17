@@ -56,6 +56,19 @@ pub fn cursor_badge(ctx: &egui::Context, name: &str, p: egui::Pos2) {
     badge(ctx, name, p, false);
 }
 
+pub fn cursor_tool_badge(ctx: &egui::Context, name: &str, p: egui::Pos2) {
+    const SIZE: f32 = 13.0;
+    let rect = Rect::from_center_size(p + egui::vec2(16.0, -12.0), Vec2::splat(SIZE));
+    let area = egui::Area::new(egui::Id::new("pc-tool-cursor-badge")).order(egui::Order::Tooltip).fixed_pos(rect.min).constrain(false).interactable(false);
+    area.show(ctx, |ui| {
+        let outline = image(name, SIZE, Color32::from_black_alpha(220));
+        for (dx, dy) in [(-1.0, 0.0), (1.0, 0.0), (0.0, -1.0), (0.0, 1.0), (-1.0, -1.0), (1.0, 1.0), (-1.0, 1.0), (1.0, -1.0)] {
+            outline.paint_at(ui, rect.translate(egui::vec2(dx, dy)));
+        }
+        image(name, SIZE, Color32::WHITE).paint_at(ui, rect);
+    });
+}
+
 /// Photoshop's duplicate badge: a second, dark arrowhead behind a white one.
 pub fn cursor_copy_badge(ctx: &egui::Context, p: egui::Pos2) {
     badge(ctx, "mouse-pointer-2", p, true);
@@ -138,6 +151,8 @@ pub fn tool_icon(t: Tool) -> &'static str {
         Tool::Pen => "pen-tool",
         Tool::FreeformPen => "pen-freeform",
         Tool::CurvaturePen => "pen-curvature",
+        Tool::SaiLine => "spline",
+        Tool::SaiLineWidth => "spline-width",
         Tool::AddAnchorPoint => "pen-add-anchor",
         Tool::DeleteAnchorPoint => "pen-delete-anchor",
         Tool::ConvertPoint => "convert-point",

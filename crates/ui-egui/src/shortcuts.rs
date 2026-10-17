@@ -464,6 +464,15 @@ pub fn handle(app: &mut PhotocraftApp, ctx: &egui::Context) {
             return;
         }
     }
+    if crate::sailine_ui::keys(app, ctx) {
+        return;
+    }
+    // Ctrl+Y is a common platform alias for Redo. Keep it available after a SaiLine commit in
+    // addition to the configured Cmd/Ctrl+Shift+Z binding.
+    if ctx.input_mut(|i| i.consume_key(Modifiers::CTRL, Key::Y)) {
+        let _ = app.run("edit.redo", json!({}));
+        return;
+    }
     // Pen path in progress: ↩ and Esc both end it as an open path and keep it, as in Photoshop (#1769).
     if app.ui.pen.is_some() && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Enter) || i.consume_key(Modifiers::NONE, Key::Escape)) {
         crate::vector_ui::pen_commit(app, false);

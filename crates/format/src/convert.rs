@@ -153,6 +153,7 @@ fn layer_m(l: &Layer, sink: &mut dyn Sink) -> LayerM {
             stroke: s.stroke.clone(),
             live: s.live.clone(),
         },
+        LayerContent::Linework(linework) => ContentM::Linework { linework: linework.clone(), cache: linework.cache.as_ref().map(|s| surface_m(s, sink)) },
         LayerContent::Smart(s) => ContentM::Smart {
             contents_id: Some(s.contents_id.0),
             source: match &s.source {
@@ -474,6 +475,11 @@ impl Loader<'_> {
                 cache: self.opt_surface(cache)?,
                 psd_raw: self.opt_blob(psd_raw)?,
             }),
+            ContentM::Linework { linework, cache } => {
+                let mut linework = linework.clone();
+                linework.cache = self.opt_surface(cache)?;
+                LayerContent::Linework(linework)
+            }
             ContentM::Smart { contents_id, source, transform, smart_filters, cache, psd_raw, filters_enabled, filter_mask, warp, stack_mode, perspective } => {
                 LayerContent::Smart(SmartObject {
                     contents_id: self.contents_id(*contents_id, source),

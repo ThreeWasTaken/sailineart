@@ -440,6 +440,17 @@ fn shift_shown(doc: &Document, l: &mut Layer, dx: i32, dy: i32) {
                 _ => crate::vector_cmds::refresh_shape(doc, sh),
             }
         }
+        LayerContent::Linework(linework) => {
+            for path in &mut linework.paths {
+                for point in &mut path.points {
+                    point.position[0] += f64::from(dx);
+                    point.position[1] += f64::from(dy);
+                }
+            }
+            if let Some(c) = &mut linework.cache {
+                *c = translate_surface(c, dx, dy);
+            }
+        }
         LayerContent::Smart(sm) => crate::smart_cmds::shift_smart(sm, dx, dy),
         LayerContent::Group(g) => {
             if let Some(ab) = &mut g.artboard {

@@ -119,6 +119,8 @@ pub enum Tool {
     Pen,
     FreeformPen,
     CurvaturePen,
+    SaiLine,
+    SaiLineWidth,
     AddAnchorPoint,
     DeleteAnchorPoint,
     /// Converts an anchor between smooth and corner, and pulls handles out of a corner
@@ -137,8 +139,12 @@ pub enum Tool {
     Frame,
 }
 
+fn default_sailine_width() -> f32 {
+    3.0
+}
+
 impl Tool {
-    pub const ALL: [Tool; 67] = [
+    pub const ALL: [Tool; 69] = [
         Tool::Move,
         Tool::Artboard,
         Tool::RectMarquee,
@@ -192,6 +198,8 @@ impl Tool {
         Tool::Pen,
         Tool::FreeformPen,
         Tool::CurvaturePen,
+        Tool::SaiLine,
+        Tool::SaiLineWidth,
         Tool::AddAnchorPoint,
         Tool::DeleteAnchorPoint,
         Tool::ConvertPoint,
@@ -266,6 +274,8 @@ impl Tool {
             Tool::Pen => "Pen Tool",
             Tool::FreeformPen => "Freeform Pen Tool",
             Tool::CurvaturePen => "Curvature Pen Tool",
+            Tool::SaiLine => "SaiLine Tool",
+            Tool::SaiLineWidth => "SaiLine Width Tool",
             Tool::AddAnchorPoint => "Add Anchor Point Tool",
             Tool::DeleteAnchorPoint => "Delete Anchor Point Tool",
             Tool::ConvertPoint => "Convert Point Tool",
@@ -340,7 +350,14 @@ impl Tool {
             Tool::SingleRowMarquee | Tool::SingleColumnMarquee => '\0',
             Tool::Dodge | Tool::Burn | Tool::Sponge => 'O',
             Tool::QuickSelection | Tool::ObjectSelection => 'W',
-            Tool::Pen | Tool::FreeformPen | Tool::CurvaturePen | Tool::AddAnchorPoint | Tool::DeleteAnchorPoint | Tool::ConvertPoint => 'P',
+            Tool::Pen
+            | Tool::FreeformPen
+            | Tool::CurvaturePen
+            | Tool::SaiLine
+            | Tool::SaiLineWidth
+            | Tool::AddAnchorPoint
+            | Tool::DeleteAnchorPoint
+            | Tool::ConvertPoint => 'P',
             Tool::PathSelection | Tool::DirectSelection => 'A',
             Tool::Rectangle | Tool::EllipseShape | Tool::Triangle | Tool::Polygon | Tool::Line | Tool::CustomShape => 'U',
         }
@@ -580,6 +597,8 @@ pub struct ToolOptions {
     /// radius, polygon sides, line weight.
     pub shape_fill: bool,
     pub stroke_width: f32,
+    #[serde(default = "default_sailine_width")]
+    pub sailine_width: f32,
     #[serde(default)]
     pub shape_stroke: crate::shape_stroke_ui::StrokeOptions,
     pub corner_radius: f32,
@@ -799,6 +818,7 @@ impl Default for ToolOptions {
             vector_mode: "path".into(),
             shape_fill: true,
             stroke_width: 0.0,
+            sailine_width: default_sailine_width(),
             shape_stroke: Default::default(),
             corner_radius: 0.0,
             polygon_sides: 5,
@@ -1129,6 +1149,20 @@ pub struct UiState {
     /// Pen path under construction.
     #[serde(default)]
     pub pen: Option<crate::vector_ui::PenPath>,
+    /// SaiLine draft, tied to this session's document; exposed to inspection, never restored.
+    #[serde(default, skip_deserializing)]
+    pub sailine: Option<crate::sailine_ui::Draft>,
+    #[serde(default, skip_deserializing)]
+    pub sailine_selection: Option<crate::sailine_ui::Selection>,
+    /// Additional SaiLine point selections (the primary selection is kept above for compatibility).
+    #[serde(default)]
+    pub sailine_selections: Vec<crate::sailine_ui::Selection>,
+    #[serde(default, skip_deserializing)]
+    pub sailine_point_drag: Option<crate::sailine_ui::PointDrag>,
+    #[serde(default, skip_deserializing)]
+    pub sailine_width_drag: Option<crate::sailine_ui::PointWidthDrag>,
+    #[serde(default, skip_deserializing)]
+    pub sailine_selection_box: Option<crate::sailine_ui::SelectionBox>,
     #[serde(default)]
     pub stroke_editor: Option<crate::shape_stroke_ui::StrokeEditor>,
     /// Direct Selection tool: selected anchors and the drag in progress (#790).
@@ -1308,6 +1342,12 @@ impl Default for UiState {
             shell: Default::default(),
             layer_filter: Vec::new(),
             pen: None,
+            sailine: None,
+            sailine_selection: None,
+            sailine_selections: Vec::new(),
+            sailine_point_drag: None,
+            sailine_width_drag: None,
+            sailine_selection_box: None,
             stroke_editor: None,
             direct_selection: Default::default(),
             selected_path: None,
@@ -1414,7 +1454,7 @@ mod tests {
         assert!(!Tool::RedEye.is_brushlike());
         assert_eq!(Tool::from_name("patternStamp"), Some(Tool::PatternStamp));
         assert_eq!(Tool::from_name("Pattern Stamp Tool"), Some(Tool::PatternStamp));
-        assert_eq!(Tool::ALL.len(), 67);
+        assert_eq!(Tool::ALL.len(), 68);
         assert_eq!(Tool::from_name("Vertical Type Mask Tool"), Some(Tool::VerticalTypeMask));
         assert_eq!(Tool::from_name("addAnchorPoint"), Some(Tool::AddAnchorPoint));
         assert_eq!(Tool::from_name("Delete Anchor Point Tool"), Some(Tool::DeleteAnchorPoint));

@@ -616,6 +616,7 @@ impl Ex {
                 let (w, h) = (self.canvas.width(), self.canvas.height());
                 crate::vector_map::shape_blocks(sh, &mut raw, w, h, self.dpi);
             }
+            LayerContent::Linework(_) => {}
             LayerContent::Text(t) => {
                 // Text layers without PSD data (created here) get a generated TySh.
                 let generated = t.psd_raw.is_none().then(|| std::sync::Arc::new(photocraft_text::psd::build_tysh(t, self.dpi, None)));
@@ -1069,6 +1070,10 @@ impl Ex {
                 }
                 LayerContent::Shape(sh) => {
                     let r = self.record(l, extra, sh.cache.as_ref());
+                    self.records.push(r);
+                }
+                LayerContent::Linework(linework) => {
+                    let r = self.record(l, extra, linework.cache.as_ref());
                     self.records.push(r);
                 }
                 LayerContent::Smart(sm) => {

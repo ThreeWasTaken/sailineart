@@ -295,6 +295,12 @@ pub enum ContentM {
         #[serde(default)]
         live: Option<LiveShape>,
     },
+    /// Editable SaiLine paths. The point list is canonical; render caches stay out of the manifest.
+    Linework {
+        linework: photocraft_doc::LineworkLayer,
+        #[serde(default)]
+        cache: Option<SurfaceM>,
+    },
     Smart {
         /// Shared source identity; older bundles did not record it.
         #[serde(default)]

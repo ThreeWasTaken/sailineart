@@ -968,10 +968,12 @@ fn empty_in(layer: &Layer, rect: Rect) -> bool {
         return transparent_outside(layer) && bounds.inflate(effects::margin(layer)).intersect(&rect).is_empty();
     }
     match &layer.content {
-        LayerContent::Raster(_) | LayerContent::Text(_) | LayerContent::Shape(_) | LayerContent::Smart(_) => match layer.surface() {
-            Some(s) => !s.has_tiles_in(rect) && s.default_pixel().last().is_some_and(|a| *a <= 0.0) && s.format().alpha,
-            None => true,
-        },
+        LayerContent::Raster(_) | LayerContent::Text(_) | LayerContent::Shape(_) | LayerContent::Linework(_) | LayerContent::Smart(_) => {
+            match layer.surface() {
+                Some(s) => !s.has_tiles_in(rect) && s.default_pixel().last().is_some_and(|a| *a <= 0.0) && s.format().alpha,
+                None => true,
+            }
+        }
         _ => false,
     }
 }
@@ -1003,7 +1005,7 @@ fn shapeless_stroke_bounds(layer: &Layer) -> Option<Rect> {
     }
 
     match &layer.content {
-        LayerContent::Raster(_) | LayerContent::Text(_) | LayerContent::Shape(_) | LayerContent::Smart(_) => {
+        LayerContent::Raster(_) | LayerContent::Text(_) | LayerContent::Shape(_) | LayerContent::Linework(_) | LayerContent::Smart(_) => {
             let b = layer.surface().map_or(Rect::EMPTY, bounds::content_bounds);
             // A filled shape's effects follow its outline, also where its fill is transparent (as
             // in `layer_bounds`).
