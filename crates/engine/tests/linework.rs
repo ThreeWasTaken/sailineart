@@ -130,3 +130,66 @@ fn linework_point_width_is_persisted_and_rerenders_the_outline() {
     assert_eq!(linework.paths[0].points.iter().map(|point| point.width_factor).collect::<Vec<_>>(), vec![0.5, 2.5, 1.0]);
     assert!(linework.cache.is_some());
 }
+
+#[test]
+fn interpolation_preview_switches_geometry_without_history_or_document_changes() {
+    let mut s = Session::new();
+    s.execute("file.new", json!({"width": 96, "height": 96})).unwrap();
+    let result = s.execute("linework.create", json!({"points": [[5, 5], [25, 60], [80, 10]], "width": 4})).unwrap();
+    let layer = photocraft_doc::LayerId(result["layer"].as_u64().unwrap());
+    let points_before = match &s.active().unwrap().doc.layer(layer).unwrap().content {
+        LayerContent::Linework(linework) => linework.paths[0].points.clone(),
+        _ => panic!("linework layer expected"),
+    };
+    let history_before = s.active().unwrap().history.entries().len();
+    let journal_before = s.journal.len();
+    let was_clean = s.active().unwrap().saved_revision == s.active().unwrap().revision;
+    let legacy_cache = match &s.active().unwrap().doc.layer(layer).unwrap().content {
+        LayerContent::Linework(linework) => linework.cache.clone(),
+        _ => None,
+    };
+
+    s.execute("linework.setInterpolation", json!({"interpolation": "saiOptimized"})).unwrap();
+    let state = s.active().unwrap();
+    assert_eq!(state.history.entries().len(), history_before);
+    assert_eq!(s.journal.len(), journal_before);
+    assert_eq!(state.saved_revision == state.revision, was_clean, "view-only preview must preserve document dirty state");
+    let (points_after, optimized_cache) = match &state.doc.layer(layer).unwrap().content {
+        LayerContent::Linework(linework) => (linework.paths[0].points.clone(), linework.cache.clone()),
+        _ => panic!("linework layer expected"),
+    };
+    assert_eq!(points_after, points_before);
+    assert_ne!(optimized_cache, legacy_cache, "model switch should immediately rebuild the rendered geometry");
+}
+
+#[test]
+fn selected_interpolation_is_used_by_edits_and_survives_undo_redo_and_save() {
+    let mut s = Session::new();
+    s.execute("file.new", json!({"width": 96, "height": 96})).unwrap();
+    let result = s.execute("linework.create", json!({"points": [[5, 5], [25, 60], [80, 10]], "width": 4, "interpolation": "saiOptimized"})).unwrap();
+    let layer = photocraft_doc::LayerId(result["layer"].as_u64().unwrap());
+    let (path, point) = match &s.active().unwrap().doc.layer(layer).unwrap().content {
+        LayerContent::Linework(linework) => (linework.paths[0].id, linework.paths[0].points[1].id),
+        _ => panic!("linework layer expected"),
+    };
+    s.execute("linework.movePoint", json!({"layer": layer.0, "path": path, "point": point, "x": 30, "y": 55, "interpolation": "saiOptimized"})).unwrap();
+    let moved_cache = match &s.active().unwrap().doc.layer(layer).unwrap().content {
+        LayerContent::Linework(linework) => linework.cache.clone(),
+        _ => None,
+    };
+    assert!(s.undo());
+    assert!(s.redo());
+    let redone_cache = match &s.active().unwrap().doc.layer(layer).unwrap().content {
+        LayerContent::Linework(linework) => linework.cache.clone(),
+        _ => None,
+    };
+    assert_eq!(redone_cache, moved_cache);
+    let bytes = save_to_bytes(&s.active().unwrap().doc, &SaveOptions::default()).unwrap();
+    let loaded = load_from_bytes(&bytes).unwrap();
+    let loaded_linework = match &loaded.layer(layer).unwrap().content {
+        LayerContent::Linework(linework) => linework,
+        _ => panic!("linework layer expected"),
+    };
+    assert_eq!(loaded_linework.paths[0].points[1].position, [30.0, 55.0]);
+    assert_eq!(loaded_linework.cache, redone_cache);
+}

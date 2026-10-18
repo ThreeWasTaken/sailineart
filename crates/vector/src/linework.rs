@@ -9,6 +9,35 @@ use photocraft_geom::Point;
 
 const MAX_POINTS: usize = 4096;
 
+/// Temporary interpolation choices for evaluating SaiLine geometry. `Legacy` is the
+/// production interpolator that predates the SAI research experiment.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum InterpolationModel {
+    #[default]
+    Legacy,
+    SaiSimplified,
+    SaiOptimized,
+}
+
+impl InterpolationModel {
+    pub fn from_id(id: &str) -> Option<Self> {
+        match id {
+            "legacy" => Some(Self::Legacy),
+            "saiSimplified" => Some(Self::SaiSimplified),
+            "saiOptimized" => Some(Self::SaiOptimized),
+            _ => None,
+        }
+    }
+
+    pub const fn id(self) -> &'static str {
+        match self {
+            Self::Legacy => "legacy",
+            Self::SaiSimplified => "saiSimplified",
+            Self::SaiOptimized => "saiOptimized",
+        }
+    }
+}
+
 fn smoothstep01(value: f64) -> f64 {
     let value = value.clamp(0.0, 1.0);
     value * value * (3.0 - 2.0 * value)
@@ -40,6 +69,14 @@ pub fn interpolate_points(points: &[[f64; 2]]) -> Result<Path, String> {
 /// Interpolate with an optional live handle at the last anchor. SaiLine uses the handle's
 /// direction for the incoming tangent and its distance as the rounding amount.
 pub fn interpolate_points_with_handle(points: &[[f64; 2]], handle: Option<[f64; 2]>) -> Result<Path, String> {
+    interpolate_points_with_model(points, handle, InterpolationModel::Legacy)
+}
+
+/// Interpolate with one of the experimental SAI parameter sets, or the unchanged Legacy model.
+pub fn interpolate_points_with_model(points: &[[f64; 2]], handle: Option<[f64; 2]>, model: InterpolationModel) -> Result<Path, String> {
+    if model != InterpolationModel::Legacy {
+        return interpolate_sai(points, model);
+    }
     if points.len() < 2 {
         return Err("linework needs at least two points".into());
     }
@@ -212,8 +249,87 @@ pub fn interpolate_points_with_handle(points: &[[f64; 2]], handle: Option<[f64; 
     Ok(Path::new(vec![Subpath { closed: false, knots, op: PathOp::Combine }]))
 }
 
+/// Port of `experiments/sailine_sai126/src/main.rs::catmull`, including its two-point
+/// secant special case and coincident-anchor handling. The balance power is the experiment's
+/// β parameter; α controls chord-length parameterization.
+fn interpolate_sai(points: &[[f64; 2]], model: InterpolationModel) -> Result<Path, String> {
+    if points.len() < 2 {
+        return Err("linework needs at least two points".into());
+    }
+    if points.len() > MAX_POINTS {
+        return Err(format!("linework accepts at most {MAX_POINTS} points"));
+    }
+    if points.iter().any(|p| p.iter().any(|v| !v.is_finite() || v.abs() > 1_000_000.0)) {
+        return Err("linework points must be finite and within ±1000000 px".into());
+    }
+    let (alpha, beta, tension) = if model == InterpolationModel::SaiSimplified { (1.0 / 3.0, 0.5, -0.2) } else { (0.3375, 0.4875, -0.2) };
+    let distance = |a: [f64; 2], b: [f64; 2]| (a[0] - b[0]).hypot(a[1] - b[1]);
+    let n = points.len();
+    let h: Vec<f64> = points.windows(2).map(|w| distance(w[0], w[1]).max(1e-9).powf(alpha)).collect();
+    let mut d = vec![[0.0; 2]; n];
+    for i in 1..n - 1 {
+        let a = h[i - 1];
+        let b = h[i];
+        let sa = [(points[i][0] - points[i - 1][0]) / a, (points[i][1] - points[i - 1][1]) / a];
+        let sb = [(points[i + 1][0] - points[i][0]) / b, (points[i + 1][1] - points[i][1]) / b];
+        d[i] = [(sa[0] * b + sb[0] * a) / (a + b), (sa[1] * b + sb[1] * a) / (a + b)];
+        let previous = distance(points[i], points[i - 1]);
+        let next = distance(points[i + 1], points[i]);
+        let ratio = previous.min(next) / previous.max(next).max(1e-12);
+        let scale = ratio.max(1e-12).powf(beta);
+        d[i][0] *= scale;
+        d[i][1] *= scale;
+    }
+    // The reference experiment sets both endpoint tangents to zero for n > 2. With
+    // exactly two points it uses secants, so the segment remains straight.
+    if n == 2 {
+        d[0] = [(points[1][0] - points[0][0]) / h[0], (points[1][1] - points[0][1]) / h[0]];
+        d[1] = d[0];
+    }
+    let scale = 1.0 - tension;
+    d.iter_mut().for_each(|v| {
+        v[0] *= scale;
+        v[1] *= scale;
+    });
+    for i in 0..n - 1 {
+        if distance(points[i], points[i + 1]) <= f64::EPSILON {
+            d[i] = [0.0, 0.0];
+            d[i + 1] = [0.0, 0.0];
+        }
+    }
+    let knots = (0..n)
+        .map(|i| {
+            let anchor = Point::new(points[i][0], points[i][1]);
+            let (in_ctrl, out_ctrl) = if i == 0 {
+                (anchor, Point::new(anchor.x + d[i][0] * h[0] / 3.0, anchor.y + d[i][1] * h[0] / 3.0))
+            } else if i + 1 == n {
+                (Point::new(anchor.x - d[i][0] * h[i - 1] / 3.0, anchor.y - d[i][1] * h[i - 1] / 3.0), anchor)
+            } else {
+                (
+                    Point::new(anchor.x - d[i][0] * h[i - 1] / 3.0, anchor.y - d[i][1] * h[i - 1] / 3.0),
+                    Point::new(anchor.x + d[i][0] * h[i] / 3.0, anchor.y + d[i][1] * h[i] / 3.0),
+                )
+            };
+            Knot { anchor, in_ctrl, out_ctrl, smooth: i > 0 && i + 1 < n }
+        })
+        .collect();
+    Ok(Path::new(vec![Subpath { closed: false, knots, op: PathOp::Combine }]))
+}
+
 /// Build a filled outline with linearly interpolated width factors at the logical anchors.
 pub fn variable_width_shape(points: &[[f64; 2]], factors: &[f32], width: f64, color: Color, handle: Option<[f64; 2]>) -> Result<ShapeLayer, String> {
+    variable_width_shape_with_model(points, factors, width, color, handle, InterpolationModel::Legacy)
+}
+
+/// Build the variable-width outline using the requested centerline interpolation model.
+pub fn variable_width_shape_with_model(
+    points: &[[f64; 2]],
+    factors: &[f32],
+    width: f64,
+    color: Color,
+    handle: Option<[f64; 2]>,
+    model: InterpolationModel,
+) -> Result<ShapeLayer, String> {
     if factors.len() != points.len() {
         return Err("linework width factors must match point count".into());
     }
@@ -223,7 +339,7 @@ pub fn variable_width_shape(points: &[[f64; 2]], factors: &[f32], width: f64, co
     if factors.iter().any(|factor| !factor.is_finite() || *factor < 0.0) {
         return Err("linework width factors must be finite and non-negative".into());
     }
-    let center = interpolate_points_with_handle(points, handle)?;
+    let center = interpolate_points_with_model(points, handle, model)?;
     let segments = center.subpaths.first().ok_or("linework path has no subpath")?.segments();
     let mut samples = Vec::new();
     for (index, segment) in segments.iter().enumerate() {
@@ -276,6 +392,14 @@ pub fn variable_width_shape(points: &[[f64; 2]], factors: &[f32], width: f64, co
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn eval(segment: &[Point; 4], t: f64) -> [f64; 2] {
+        let u = 1.0 - t;
+        [
+            u * u * u * segment[0].x + 3.0 * u * u * t * segment[1].x + 3.0 * u * t * t * segment[2].x + t * t * t * segment[3].x,
+            u * u * u * segment[0].y + 3.0 * u * u * t * segment[1].y + 3.0 * u * t * t * segment[2].y + t * t * t * segment[3].y,
+        ]
+    }
 
     fn sampled_path_distance(a: &[[f64; 2]], b: &[[f64; 2]]) -> f64 {
         let a = interpolate_points(a).unwrap();
@@ -470,5 +594,95 @@ mod tests {
         assert!(interpolate_points(&[[0.0, 0.0]]).is_err());
         assert!(interpolate_points(&[[0.0, f64::NAN], [1.0, 1.0]]).is_err());
         assert!(interpolate_points(&[[0.0, 0.0], [1_000_001.0, 1.0]]).is_err());
+    }
+
+    #[test]
+    fn legacy_model_is_bit_for_bit_the_existing_entry_point() {
+        let points = [[0.0, 0.0], [120.0, -30.0], [170.0, 90.0], [400.0, 40.0]];
+        assert_eq!(interpolate_points_with_handle(&points, None).unwrap(), interpolate_points_with_model(&points, None, InterpolationModel::Legacy).unwrap());
+    }
+
+    #[test]
+    fn experimental_models_interpolate_points_and_are_reversible() {
+        let points = [[0.0, 0.0], [37.0, 0.0], [37.0, 83.0], [190.0, 97.0], [230.0, 12.0]];
+        for model in [InterpolationModel::SaiSimplified, InterpolationModel::SaiOptimized] {
+            let path = interpolate_points_with_model(&points, None, model).unwrap();
+            let reversed_points: Vec<_> = points.iter().rev().copied().collect();
+            let reversed = interpolate_points_with_model(&reversed_points, None, model).unwrap();
+            let segments = path.subpaths[0].segments();
+            let reverse_segments = reversed.subpaths[0].segments();
+            assert_eq!(segments.len(), points.len() - 1);
+            for (i, point) in points.iter().enumerate() {
+                let knot = &path.subpaths[0].knots[i];
+                assert_eq!([knot.anchor.x, knot.anchor.y], *point);
+            }
+            for (forward, backward) in segments.iter().zip(reverse_segments.iter().rev()) {
+                for step in 0..=20 {
+                    let t = step as f64 / 20.0;
+                    let a = eval(forward, t);
+                    let b = eval(backward, 1.0 - t);
+                    assert!((a[0] - b[0]).hypot(a[1] - b[1]) < 1e-8, "{model:?} should reverse without changing geometry");
+                }
+            }
+        }
+        let simplified = interpolate_points_with_model(&points, None, InterpolationModel::SaiSimplified).unwrap();
+        let optimized = interpolate_points_with_model(&points, None, InterpolationModel::SaiOptimized).unwrap();
+        let legacy = interpolate_points_with_model(&points, None, InterpolationModel::Legacy).unwrap();
+        assert_ne!(simplified, optimized, "the two experiment parameter sets should remain independently selectable");
+        assert_ne!(legacy, optimized, "the experimental model should differ from the production baseline on this geometry");
+        for path in [&simplified, &optimized] {
+            let knots = &path.subpaths[0].knots;
+            assert_eq!(knots[0].anchor, knots[0].out_ctrl, "SAI experimental start tangent is zero");
+            assert_eq!(knots[knots.len() - 1].anchor, knots[knots.len() - 1].in_ctrl, "SAI experimental end tangent is zero");
+        }
+    }
+
+    #[test]
+    fn experimental_tangents_are_directionally_continuous_and_local() {
+        let points = [[0.0, 0.0], [31.0, 4.0], [60.0, 35.0], [104.0, 40.0], [135.0, 5.0], [170.0, 0.0], [220.0, 30.0]];
+        let moved = [[0.0, 0.0], [31.0, 4.0], [63.0, 39.0], [104.0, 40.0], [135.0, 5.0], [170.0, 0.0], [220.0, 30.0]];
+        for model in [InterpolationModel::SaiSimplified, InterpolationModel::SaiOptimized] {
+            let base = interpolate_points_with_model(&points, None, model).unwrap();
+            let altered = interpolate_points_with_model(&moved, None, model).unwrap();
+            let a = base.subpaths[0].segments();
+            let b = altered.subpaths[0].segments();
+            // Moving P2 can affect segments 0..3; segments four and beyond must stay identical.
+            assert_eq!(a[4..], b[4..]);
+            for i in 1..points.len() - 1 {
+                let left = a[i - 1];
+                let right = a[i];
+                let incoming = [left[3].x - left[2].x, left[3].y - left[2].y];
+                let outgoing = [right[1].x - right[0].x, right[1].y - right[0].y];
+                let cross = incoming[0] * outgoing[1] - incoming[1] * outgoing[0];
+                let dot = incoming[0] * outgoing[0] + incoming[1] * outgoing[1];
+                assert!(cross.abs() < 1e-8 && dot >= 0.0, "tangent direction breaks at anchor {i}");
+            }
+        }
+    }
+
+    #[test]
+    fn experimental_models_remain_finite_for_short_and_coincident_segments() {
+        let cases =
+            [vec![[0.0, 0.0], [1e-10, 0.0], [1.0, 0.0]], vec![[0.0, 0.0], [0.0, 0.0], [1.0, 1.0]], vec![[0.0, 0.0], [1.0, 0.0], [1.0, 0.0], [1.0, 1.0]]];
+        for points in cases {
+            for model in [InterpolationModel::SaiSimplified, InterpolationModel::SaiOptimized] {
+                let path = interpolate_points_with_model(&points, None, model).unwrap();
+                assert!(
+                    path.subpaths[0]
+                        .knots
+                        .iter()
+                        .all(|k| [k.anchor.x, k.anchor.y, k.in_ctrl.x, k.in_ctrl.y, k.out_ctrl.x, k.out_ctrl.y].iter().all(|v| v.is_finite()))
+                );
+            }
+        }
+        let straight = interpolate_points_with_model(&[[0.0, 0.0], [1.0, 0.0], [2.0, 0.0], [3.0, 0.0]], None, InterpolationModel::SaiOptimized).unwrap();
+        for segment in straight.subpaths[0].segments() {
+            let mut previous_x = segment[0].x;
+            for step in 1..=100 {
+                let point = eval(&segment, step as f64 / 100.0);
+                assert!(point[0] >= previous_x - 1e-10, "unexpected loop or reversal on monotone collinear input");
+                previous_x = point[0];
+            }
+        }
     }
 }

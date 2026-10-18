@@ -9,6 +9,14 @@ use crate::{PhotocraftApp, canvas::ViewXform, state::Tool, theme::Tokens};
 
 static NEXT_DRAG: AtomicU64 = AtomicU64::new(1);
 
+fn interpolation_id(app: &PhotocraftApp) -> &'static str {
+    match app.ui.tool_options.sailine_interpolation.as_str() {
+        "saiSimplified" => "saiSimplified",
+        "saiOptimized" => "saiOptimized",
+        _ => "legacy",
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Draft {
     pub document: DocId,
@@ -79,7 +87,8 @@ pub fn down_with_mods(app: &mut PhotocraftApp, point: [f64; 2], mods: Modifiers)
         && let Some((layer, path, point_id)) = nearest_point(app, point)
     {
         if mods.alt {
-            let _ = app.run("linework.deletePoint", json!({"layer": layer.0, "path": path, "point": point_id}));
+            let model = interpolation_id(app);
+            let _ = app.run("linework.deletePoint", json!({"layer": layer.0, "path": path, "point": point_id, "interpolation": model}));
             return;
         }
         let selection = Selection { document, layer, path, point: point_id };
@@ -112,7 +121,10 @@ pub fn begin_drag(app: &mut PhotocraftApp, point: [f64; 2]) -> bool {
         found
     } else {
         let Some((layer, path, index, position)) = nearest_segment(app, point) else { return false };
-        let Ok(result) = app.run("linework.insertPoint", json!({"layer": layer.0, "path": path, "index": index, "x": position[0], "y": position[1]})) else {
+        let model = interpolation_id(app);
+        let Ok(result) = app
+            .run("linework.insertPoint", json!({"layer": layer.0, "path": path, "index": index, "x": position[0], "y": position[1], "interpolation": model}))
+        else {
             return false;
         };
         let Some(point_id) = result["point"].as_u64() else { return false };
@@ -139,7 +151,8 @@ pub fn drag_to(app: &mut PhotocraftApp, point: [f64; 2]) -> bool {
         .zip(drag.origins.iter())
         .map(|(selection, origin)| json!({"layer": selection.layer.0, "path": selection.path, "point": selection.point, "x": origin[0] + dx, "y": origin[1] + dy}))
         .collect();
-    let _ = app.run("linework.movePoints", json!({"points": points, "coalesce": format!("sailine-move:{}", drag.key)}));
+    let model = interpolation_id(app);
+    let _ = app.run("linework.movePoints", json!({"points": points, "coalesce": format!("sailine-move:{}", drag.key), "interpolation": model}));
     true
 }
 
@@ -253,9 +266,10 @@ pub fn width_drag_to(app: &mut PhotocraftApp, point: [f64; 2]) -> bool {
         drag.current_factor = (drag.start_factor + (dx / 120.0) as f32).clamp(0.0, 1000.0);
         (drag.selection, drag.current_factor)
     };
+    let model = interpolation_id(app);
     let _ = app.run(
         "linework.setPointWidth",
-        json!({"layer": selection.layer.0, "path": selection.path, "point": selection.point, "factor": factor, "coalesce": "sailine-width-drag"}),
+        json!({"layer": selection.layer.0, "path": selection.path, "point": selection.point, "factor": factor, "coalesce": "sailine-width-drag", "interpolation": model}),
     );
     true
 }
@@ -274,8 +288,11 @@ pub fn end_width_drag(app: &mut PhotocraftApp, point: [f64; 2]) {
         let base = path_width(app, s).unwrap_or(width).max(0.001);
         (width / base).clamp(0.0, 1000.0)
     };
-    let _ =
-        app.run("linework.setPointWidth", json!({"layer": s.layer.0, "path": s.path, "point": s.point, "factor": factor, "coalesce": "sailine-width-drag"}));
+    let model = interpolation_id(app);
+    let _ = app.run(
+        "linework.setPointWidth",
+        json!({"layer": s.layer.0, "path": s.path, "point": s.point, "factor": factor, "coalesce": "sailine-width-drag", "interpolation": model}),
+    );
     if drag.moved
         && let Some(base) = path_width(app, s)
     {
@@ -310,7 +327,8 @@ fn nearest_segment(app: &PhotocraftApp, point: [f64; 2]) -> Option<(LayerId, u64
 pub fn commit(app: &mut PhotocraftApp) {
     sync(app);
     let Some(draft) = app.ui.sailine.as_ref().filter(|d| d.points.len() >= 2) else { return };
-    let params = json!({"points": draft.points, "width": app.ui.tool_options.sailine_width, "color": app.session.tools.foreground});
+    let model = interpolation_id(app);
+    let params = json!({"points": draft.points, "width": app.ui.tool_options.sailine_width, "color": app.session.tools.foreground, "interpolation": model});
     match app.run("linework.create", params) {
         Ok(_) => app.ui.sailine = None,
         Err(e) => {
@@ -373,6 +391,34 @@ fn draw_round_anchor(painter: &egui::Painter, center: egui::Pos2, selected: bool
 
 pub fn options(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
     ui.label(if app.ui.tool == Tool::SaiLineWidth { "SaiLine Width" } else { "SaiLine" });
+    let previous_model = interpolation_id(app).to_string();
+    egui::ComboBox::from_id_salt("sailine-interpolation")
+        .selected_text(match previous_model.as_str() {
+            "saiSimplified" => "SAI simplified",
+            "saiOptimized" => "SAI optimized",
+            _ => "Legacy",
+        })
+        .show_ui(ui, |ui| {
+            ui.selectable_value(&mut app.ui.tool_options.sailine_interpolation, "legacy".into(), "Legacy");
+            ui.selectable_value(&mut app.ui.tool_options.sailine_interpolation, "saiSimplified".into(), "SAI simplified");
+            ui.selectable_value(&mut app.ui.tool_options.sailine_interpolation, "saiOptimized".into(), "SAI optimized");
+        });
+    let selected_model = interpolation_id(app);
+    if selected_model != previous_model {
+        if let Err(error) = app.run("linework.setInterpolation", json!({"interpolation": selected_model})) {
+            app.ui.status = error;
+            app.ui.status_error = true;
+        }
+    }
+    ui.label(format!(
+        "Active model: {}",
+        match selected_model {
+            "saiSimplified" => "SAI simplified",
+            "saiOptimized" => "SAI optimized",
+            _ => "Legacy",
+        }
+    ));
+    ui.checkbox(&mut app.ui.tool_options.sailine_compare_legacy, "Compare Legacy centerline");
     ui.label(tl!("Width:"));
     ui.add(egui::DragValue::new(&mut app.ui.tool_options.sailine_width).range(0.1..=1000.0).suffix(" px"));
     if let Some(selection) = app.ui.sailine_selection
@@ -389,14 +435,19 @@ pub fn options(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
         let mut factor = app.ui.sailine_width_drag.as_ref().map_or(factor, |drag| drag.current_factor);
         ui.label("Point width:");
         if ui.add(egui::DragValue::new(&mut factor).range(0.0..=1000.0).speed(0.05)).changed() {
-            let _ = app.run("linework.setPointWidth", json!({"layer": selection.layer.0, "path": selection.path, "point": selection.point, "factor": factor}));
+            let model = selected_model;
+            let _ = app.run(
+                "linework.setPointWidth",
+                json!({"layer": selection.layer.0, "path": selection.path, "point": selection.point, "factor": factor, "interpolation": model}),
+            );
         }
     }
     if let Some(selection) = app.ui.sailine_selection {
         let foreground = screen_color(app.session.tools.foreground);
         if ui.add(egui::Button::new("Path color ← foreground").fill(foreground)).clicked() {
             let color = app.session.tools.foreground;
-            let _ = app.run("linework.setPathColor", json!({"layer": selection.layer.0, "path": selection.path, "color": color}));
+            let _ =
+                app.run("linework.setPathColor", json!({"layer": selection.layer.0, "path": selection.path, "color": color, "interpolation": selected_model}));
         }
     }
     ui.label(tl!("Color:"));
@@ -417,6 +468,7 @@ pub fn options(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
 
 pub fn draw(app: &PhotocraftApp, painter: &egui::Painter, xf: &ViewXform) {
     let to_screen = |p: [f64; 2]| xf.to_screen(p[0] as f32, p[1] as f32);
+    let selected_model = interpolation_id(app);
     if let Some(draft) = app.ui.sailine.as_ref().filter(|d| app.ui.tool == Tool::SaiLine && app.session.active().is_some_and(|s| s.doc.id == d.document)) {
         let mut points = draft.points.clone();
         if let Some(hover) = app.hover_doc
@@ -426,7 +478,8 @@ pub fn draw(app: &PhotocraftApp, painter: &egui::Painter, xf: &ViewXform) {
             points.push(hover);
         }
         let handle = app.hover_doc.filter(|_| draft.points.len() >= 2);
-        if let Ok(path) = photocraft_vector::linework::interpolate_points_with_handle(&points, handle) {
+        let model = photocraft_vector::linework::InterpolationModel::from_id(interpolation_id(app)).unwrap_or_default();
+        if let Ok(path) = photocraft_vector::linework::interpolate_points_with_model(&points, handle, model) {
             let color = screen_color(app.session.tools.foreground);
             let width = (app.ui.tool_options.sailine_width * xf.zoom).max(0.5);
             for (curve, _) in crate::vector_ui::path_lines(&path, &to_screen) {
@@ -447,6 +500,17 @@ pub fn draw(app: &PhotocraftApp, painter: &egui::Painter, xf: &ViewXform) {
         let accent = Tokens::get(painter.ctx()).accent;
         for candidate in linework.paths.iter().flat_map(|path| path.points.iter()) {
             draw_round_anchor(painter, to_screen(candidate.position), selected.contains(&candidate.id) || Some(candidate.id) == hovered, accent);
+        }
+        if app.ui.tool_options.sailine_compare_legacy && selected_model != "legacy" {
+            for path in &linework.paths {
+                let points: Vec<_> = path.points.iter().map(|point| point.position).collect();
+                if let Ok(legacy) = photocraft_vector::linework::interpolate_points_with_handle(&points, path.handle) {
+                    let compare = egui::Color32::from_rgb(0, 210, 255);
+                    for (curve, _) in crate::vector_ui::path_lines(&legacy, &to_screen) {
+                        painter.add(egui::Shape::line(curve, Stroke::new((path.width * xf.zoom as f32).max(1.0), compare)));
+                    }
+                }
+            }
         }
         if let Some(selection) = app.ui.sailine_selection_box {
             let a = to_screen(selection.start);

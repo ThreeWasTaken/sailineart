@@ -143,6 +143,10 @@ fn default_sailine_width() -> f32 {
     3.0
 }
 
+fn default_sailine_interpolation() -> String {
+    "legacy".into()
+}
+
 impl Tool {
     pub const ALL: [Tool; 69] = [
         Tool::Move,
@@ -599,6 +603,12 @@ pub struct ToolOptions {
     pub stroke_width: f32,
     #[serde(default = "default_sailine_width")]
     pub sailine_width: f32,
+    /// Temporary SaiLine geometry preview. This lives in UI preferences, never in document data.
+    #[serde(default = "default_sailine_interpolation")]
+    pub sailine_interpolation: String,
+    /// Overlay the Legacy centerline while another SaiLine interpolation is active.
+    #[serde(default)]
+    pub sailine_compare_legacy: bool,
     #[serde(default)]
     pub shape_stroke: crate::shape_stroke_ui::StrokeOptions,
     pub corner_radius: f32,
@@ -819,6 +829,8 @@ impl Default for ToolOptions {
             shape_fill: true,
             stroke_width: 0.0,
             sailine_width: default_sailine_width(),
+            sailine_interpolation: default_sailine_interpolation(),
+            sailine_compare_legacy: false,
             shape_stroke: Default::default(),
             corner_radius: 0.0,
             polygon_sides: 5,

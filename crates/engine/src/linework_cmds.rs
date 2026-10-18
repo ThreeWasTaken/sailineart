@@ -19,6 +19,7 @@ const DELETE_CMD: &str = "linework.deletePoint";
 const INSERT_CMD: &str = "linework.insertPoint";
 const WIDTH_CMD: &str = "linework.setPointWidth";
 const COLOR_CMD: &str = "linework.setPathColor";
+const INTERPOLATION_CMD: &str = "linework.setInterpolation";
 const MAX_POINTS: usize = 4096;
 
 fn has_doc(s: &Session) -> std::result::Result<(), String> {
@@ -93,8 +94,24 @@ fn handle(p: &Value) -> Result<Option<[f64; 2]>> {
     Ok(Some([x, y]))
 }
 
-fn render_shape(points: &[[f64; 2]], factors: &[f32], color: Color, width: f32, handle: Option<[f64; 2]>) -> Result<ShapeLayer> {
-    vector::linework::variable_width_shape(points, factors, f64::from(width), color, handle).map_err(EngineError::Other)
+fn interpolation(p: &Value, cmd: &str) -> Result<vector::linework::InterpolationModel> {
+    match p.get("interpolation").and_then(Value::as_str).unwrap_or("legacy") {
+        "legacy" => Ok(vector::linework::InterpolationModel::Legacy),
+        "saiSimplified" => Ok(vector::linework::InterpolationModel::SaiSimplified),
+        "saiOptimized" => Ok(vector::linework::InterpolationModel::SaiOptimized),
+        value => Err(EngineError::BadParams { cmd: cmd.into(), msg: format!("unknown interpolation model `{value}`") }),
+    }
+}
+
+fn render_shape(
+    points: &[[f64; 2]],
+    factors: &[f32],
+    color: Color,
+    width: f32,
+    handle: Option<[f64; 2]>,
+    model: vector::linework::InterpolationModel,
+) -> Result<ShapeLayer> {
+    vector::linework::variable_width_shape_with_model(points, factors, f64::from(width), color, handle, model).map_err(EngineError::Other)
 }
 
 fn composite_cache(rect: photocraft_geom::Rect, format: photocraft_color::PixelFormat, base: Option<Surface>, overlay: Surface) -> Surface {
@@ -124,7 +141,7 @@ fn composite_cache(rect: photocraft_geom::Rect, format: photocraft_color::PixelF
     result
 }
 
-fn refresh_linework_cache(doc: &mut photocraft_doc::Document, layer_id: photocraft_doc::LayerId) -> Result<()> {
+fn refresh_linework_cache(doc: &mut photocraft_doc::Document, layer_id: photocraft_doc::LayerId, model: vector::linework::InterpolationModel) -> Result<()> {
     let paths = {
         let layer = doc.layer(layer_id).ok_or(EngineError::NoLayer(layer_id))?;
         let LayerContent::Linework(linework) = &layer.content else { return Err(EngineError::Other("layer is not Linework".into())) };
@@ -136,7 +153,7 @@ fn refresh_linework_cache(doc: &mut photocraft_doc::Document, layer_id: photocra
     for path in paths {
         let points: Vec<[f64; 2]> = path.points.iter().map(|point| point.position).collect();
         let factors: Vec<f32> = path.points.iter().map(|point| point.width_factor).collect();
-        let mut shape = render_shape(&points, &factors, path.color, path.width, path.handle)?;
+        let mut shape = render_shape(&points, &factors, path.color, path.width, path.handle, model)?;
         crate::vector_cmds::refresh_shape(doc, &mut shape);
         let rendered = shape.cache.ok_or(EngineError::Other("linework render cache missing".into()))?;
         cache = Some(composite_cache(bounds, format, cache, rendered));
@@ -148,10 +165,11 @@ fn refresh_linework_cache(doc: &mut photocraft_doc::Document, layer_id: photocra
 }
 
 fn create(s: &mut Session, p: &Value) -> Result<Value> {
+    let model = interpolation(p, CMD)?;
     let points = points(p)?;
     let live_handle = handle(p)?;
-    let path =
-        vector::linework::interpolate_points_with_handle(&points, live_handle).map_err(|message| EngineError::BadParams { cmd: CMD.into(), msg: message })?;
+    let path = vector::linework::interpolate_points_with_model(&points, live_handle, model)
+        .map_err(|message| EngineError::BadParams { cmd: CMD.into(), msg: message })?;
     let color = solid_color(s, p)?;
     let stroke_width = width(p)?;
     let factors = width_factors(p, points.len())?;
@@ -160,7 +178,7 @@ fn create(s: &mut Session, p: &Value) -> Result<Value> {
         point.width_factor = factor;
     }
     line.handle = live_handle;
-    let mut shape = render_shape(&points, &factors, color, stroke_width, live_handle)
+    let mut shape = render_shape(&points, &factors, color, stroke_width, live_handle, model)
         .map_err(|error| EngineError::BadParams { cmd: CMD.into(), msg: error.to_string() })?;
     let requested_name = p.get("name").and_then(Value::as_str).map(str::to_string);
     let id = s.edit("New Linework Path", |doc, active| {
@@ -193,6 +211,7 @@ fn create(s: &mut Session, p: &Value) -> Result<Value> {
 }
 
 fn move_point(s: &mut Session, p: &Value) -> Result<Value> {
+    let model = interpolation(p, MOVE_CMD)?;
     let layer = p
         .get("layer")
         .and_then(Value::as_u64)
@@ -221,7 +240,7 @@ fn move_point(s: &mut Session, p: &Value) -> Result<Value> {
                 path.handle,
             )
         };
-        let mut shape = render_shape(&points, &factors, color, width, handle)?;
+        let mut shape = render_shape(&points, &factors, color, width, handle, model)?;
         crate::vector_cmds::refresh_shape(doc, &mut shape);
         if let photocraft_doc::LayerContent::Linework(linework) = &mut doc.layer_mut(layer).ok_or(EngineError::NoLayer(layer))?.content
             && let Some(path) = linework.paths.iter_mut().find(|path| path.id == path_id)
@@ -229,13 +248,14 @@ fn move_point(s: &mut Session, p: &Value) -> Result<Value> {
             path.handle = handle;
             linework.cache = shape.cache;
         }
-        refresh_linework_cache(doc, layer)?;
+        refresh_linework_cache(doc, layer, model)?;
         Ok(())
     })?;
     Ok(json!({"layer": layer.0, "path": path_id, "point": point_id, "x": x, "y": y}))
 }
 
 fn move_points(s: &mut Session, p: &Value) -> Result<Value> {
+    let model = interpolation(p, MOVE_MANY_CMD)?;
     let values = p
         .get("points")
         .and_then(Value::as_array)
@@ -281,7 +301,7 @@ fn move_points(s: &mut Session, p: &Value) -> Result<Value> {
             }
         }
         for layer in layers {
-            refresh_linework_cache(doc, layer)?;
+            refresh_linework_cache(doc, layer, model)?;
         }
         Ok(())
     })?;
@@ -289,6 +309,7 @@ fn move_points(s: &mut Session, p: &Value) -> Result<Value> {
 }
 
 fn delete_point(s: &mut Session, p: &Value) -> Result<Value> {
+    let model = interpolation(p, DELETE_CMD)?;
     let layer = photocraft_doc::LayerId(
         p.get("layer").and_then(Value::as_u64).ok_or_else(|| EngineError::BadParams { cmd: DELETE_CMD.into(), msg: "`layer` is required".into() })?,
     );
@@ -317,18 +338,19 @@ fn delete_point(s: &mut Session, p: &Value) -> Result<Value> {
                 path.handle,
             )
         };
-        let mut shape = render_shape(&points, &factors, color, width, handle)?;
+        let mut shape = render_shape(&points, &factors, color, width, handle, model)?;
         crate::vector_cmds::refresh_shape(doc, &mut shape);
         if let photocraft_doc::LayerContent::Linework(linework) = &mut doc.layer_mut(layer).ok_or(EngineError::NoLayer(layer))?.content {
             linework.cache = shape.cache;
         }
-        refresh_linework_cache(doc, layer)?;
+        refresh_linework_cache(doc, layer, model)?;
         Ok(())
     })?;
     Ok(json!({"layer": layer.0, "path": path_id, "point": point_id}))
 }
 
 fn insert_point(s: &mut Session, p: &Value) -> Result<Value> {
+    let model = interpolation(p, INSERT_CMD)?;
     let layer = photocraft_doc::LayerId(
         p.get("layer").and_then(Value::as_u64).ok_or_else(|| EngineError::BadParams { cmd: INSERT_CMD.into(), msg: "`layer` is required".into() })?,
     );
@@ -361,18 +383,19 @@ fn insert_point(s: &mut Session, p: &Value) -> Result<Value> {
                 id,
             )
         };
-        let mut shape = render_shape(&points, &factors, color, width, handle)?;
+        let mut shape = render_shape(&points, &factors, color, width, handle, model)?;
         crate::vector_cmds::refresh_shape(doc, &mut shape);
         if let photocraft_doc::LayerContent::Linework(linework) = &mut doc.layer_mut(layer).ok_or(EngineError::NoLayer(layer))?.content {
             linework.cache = shape.cache;
         }
-        refresh_linework_cache(doc, layer)?;
+        refresh_linework_cache(doc, layer, model)?;
         Ok(id)
     })
     .map(|id| json!({"layer": layer.0, "path": path_id, "point": id, "x": x, "y": y}))
 }
 
 fn set_point_width(s: &mut Session, p: &Value) -> Result<Value> {
+    let model = interpolation(p, WIDTH_CMD)?;
     let layer = photocraft_doc::LayerId(
         p.get("layer").and_then(Value::as_u64).ok_or_else(|| EngineError::BadParams { cmd: WIDTH_CMD.into(), msg: "`layer` is required".into() })?,
     );
@@ -398,18 +421,19 @@ fn set_point_width(s: &mut Session, p: &Value) -> Result<Value> {
                 path.handle,
             )
         };
-        let mut shape = render_shape(&points, &factors, color, width, handle)?;
+        let mut shape = render_shape(&points, &factors, color, width, handle, model)?;
         crate::vector_cmds::refresh_shape(doc, &mut shape);
         if let photocraft_doc::LayerContent::Linework(linework) = &mut doc.layer_mut(layer).ok_or(EngineError::NoLayer(layer))?.content {
             linework.cache = shape.cache;
         }
-        refresh_linework_cache(doc, layer)?;
+        refresh_linework_cache(doc, layer, model)?;
         Ok(())
     })?;
     Ok(json!({"layer": layer.0, "path": path_id, "point": point_id, "factor": factor}))
 }
 
 fn set_path_color(s: &mut Session, p: &Value) -> Result<Value> {
+    let model = interpolation(p, COLOR_CMD)?;
     let layer = photocraft_doc::LayerId(
         p.get("layer").and_then(Value::as_u64).ok_or_else(|| EngineError::BadParams { cmd: COLOR_CMD.into(), msg: "`layer` is required".into() })?,
     );
@@ -432,26 +456,59 @@ fn set_path_color(s: &mut Session, p: &Value) -> Result<Value> {
                 path.handle,
             )
         };
-        let mut shape = render_shape(&points, &factors, color, width, handle)?;
+        let mut shape = render_shape(&points, &factors, color, width, handle, model)?;
         crate::vector_cmds::refresh_shape(doc, &mut shape);
         if let photocraft_doc::LayerContent::Linework(linework) = &mut doc.layer_mut(layer).ok_or(EngineError::NoLayer(layer))?.content {
             linework.cache = shape.cache;
         }
-        refresh_linework_cache(doc, layer)?;
+        refresh_linework_cache(doc, layer, model)?;
         Ok(())
     })?;
     let rgb = color.to_rgb();
     Ok(json!({"layer": layer.0, "path": path_id, "color": [rgb[0], rgb[1], rgb[2], color.alpha]}))
 }
 
+/// Rebuild ephemeral Linework raster caches for a UI-selected model. This is deliberately not an
+/// edit: control points, file data, dirty state and undo history remain untouched.
+fn set_interpolation(s: &mut Session, p: &Value) -> Result<Value> {
+    let model = interpolation(p, INTERPOLATION_CMD)?;
+    let st = s.active_mut().ok_or(EngineError::NoDocument)?;
+    let layers: Vec<_> = st.doc.layers.iter().filter_map(|layer| matches!(&layer.content, LayerContent::Linework(_)).then_some(layer.id)).collect();
+    if layers.is_empty() {
+        return Ok(json!({"interpolation": model.id()}));
+    }
+    let clean = st.saved_revision == st.revision;
+    let mut doc = (*st.doc).clone();
+    for layer in layers {
+        refresh_linework_cache(&mut doc, layer, model)?;
+    }
+    st.doc = std::sync::Arc::new(doc);
+    st.revision = st.revision.wrapping_add(1);
+    if clean {
+        st.saved_revision = st.revision;
+    }
+    st.last_damage = Some(st.doc.bounds());
+    Ok(json!({"interpolation": model.id()}))
+}
+
 pub fn specs() -> Vec<CommandSpec> {
     vec![
+        CommandSpec {
+            id: INTERPOLATION_CMD,
+            label: "Preview Linework Interpolation",
+            menu: &[],
+            shortcut: None,
+            params: r##"{"interpolation":"legacy"|"saiSimplified"|"saiOptimized"} → {interpolation}"##,
+            enabled: has_doc,
+            run: set_interpolation,
+            journal: false,
+        },
         CommandSpec {
             id: CMD,
             label: "Create Linework Path",
             menu: &[],
             shortcut: None,
-            params: r##"{"points":[[x,y],…],"handle":[x,y]? ,"width":px=3,"color":"#rrggbb"|"#rrggbbaa"|[r,g,b,a],"name":str?} → {layer,kind,points,path,width,color}"##,
+            params: r##"{"points":[[x,y],…],"handle":[x,y]? ,"width":px=3,"color":"#rrggbb"|"#rrggbbaa"|[r,g,b,a],"name":str?,"interpolation":"legacy"|"saiSimplified"|"saiOptimized"} → {layer,kind,points,path,width,color}"##,
             enabled: has_doc,
             run: create,
             journal: true,
@@ -461,7 +518,7 @@ pub fn specs() -> Vec<CommandSpec> {
             label: "Move Linework Point",
             menu: &[],
             shortcut: None,
-            params: r##"{"layer":id,"path":id,"point":id,"x":px,"y":px} → {layer,path,point,x,y}"##,
+            params: r##"{"layer":id,"path":id,"point":id,"x":px,"y":px,"interpolation":"legacy"|"saiSimplified"|"saiOptimized"?} → {layer,path,point,x,y}"##,
             enabled: has_doc,
             run: move_point,
             journal: true,
@@ -471,7 +528,7 @@ pub fn specs() -> Vec<CommandSpec> {
             label: "Move Linework Points",
             menu: &[],
             shortcut: None,
-            params: r##"{"points":[{"layer":id,"path":id,"point":id,"x":px,"y":px}…]} → {count}"##,
+            params: r##"{"points":[{"layer":id,"path":id,"point":id,"x":px,"y":px}…],"interpolation":"legacy"|"saiSimplified"|"saiOptimized"?} → {count}"##,
             enabled: has_doc,
             run: move_points,
             journal: true,
@@ -481,7 +538,7 @@ pub fn specs() -> Vec<CommandSpec> {
             label: "Delete Linework Point",
             menu: &[],
             shortcut: None,
-            params: r##"{"layer":id,"path":id,"point":id} → {layer,path,point}"##,
+            params: r##"{"layer":id,"path":id,"point":id,"interpolation":"legacy"|"saiSimplified"|"saiOptimized"?} → {layer,path,point}"##,
             enabled: has_doc,
             run: delete_point,
             journal: true,
@@ -491,7 +548,7 @@ pub fn specs() -> Vec<CommandSpec> {
             label: "Insert Linework Point",
             menu: &[],
             shortcut: None,
-            params: r##"{"layer":id,"path":id,"index":n,"x":px,"y":px} → {layer,path,point,x,y}"##,
+            params: r##"{"layer":id,"path":id,"index":n,"x":px,"y":px,"interpolation":"legacy"|"saiSimplified"|"saiOptimized"?} → {layer,path,point,x,y}"##,
             enabled: has_doc,
             run: insert_point,
             journal: true,
@@ -501,7 +558,7 @@ pub fn specs() -> Vec<CommandSpec> {
             label: "Set Linework Point Width",
             menu: &[],
             shortcut: None,
-            params: r##"{"layer":id,"path":id,"point":id,"factor":0..1000} → {layer,path,point,factor}"##,
+            params: r##"{"layer":id,"path":id,"point":id,"factor":0..1000,"interpolation":"legacy"|"saiSimplified"|"saiOptimized"?} → {layer,path,point,factor}"##,
             enabled: has_doc,
             run: set_point_width,
             journal: true,
@@ -511,7 +568,7 @@ pub fn specs() -> Vec<CommandSpec> {
             label: "Set Linework Path Color",
             menu: &[],
             shortcut: None,
-            params: r##"{"layer":id,"path":id,"color":"#rrggbb"|"#rrggbbaa"|[r,g,b,a]} → {layer,path,color}"##,
+            params: r##"{"layer":id,"path":id,"color":"#rrggbb"|"#rrggbbaa"|[r,g,b,a],"interpolation":"legacy"|"saiSimplified"|"saiOptimized"?} → {layer,path,color}"##,
             enabled: has_doc,
             run: set_path_color,
             journal: true,
