@@ -130,10 +130,14 @@ fn render_shape(
     vector::linework::variable_width_shape_with_model(points, factors, f64::from(width), color, handle, model).map_err(EngineError::Other)
 }
 
-fn composite_cache(rect: photocraft_geom::Rect, format: photocraft_color::PixelFormat, base: Option<Surface>, overlay: Surface) -> Surface {
-    let mut result = base.unwrap_or_else(|| Surface::new(format));
+fn composite_cache(rect: photocraft_geom::Rect, base: Option<Surface>, overlay: Surface) -> Surface {
+    let Some(mut result) = base else { return overlay };
     if result.channels() != 4 || overlay.channels() != 4 {
         return overlay;
+    }
+    let rect = rect.intersect(&overlay.tile_bounds());
+    if rect.is_empty() {
+        return result;
     }
     let src = overlay.read_region(rect);
     let mut dst = result.read_region(rect);
@@ -157,26 +161,67 @@ fn composite_cache(rect: photocraft_geom::Rect, format: photocraft_color::PixelF
     result
 }
 
-fn refresh_linework_cache(doc: &mut photocraft_doc::Document, layer_id: photocraft_doc::LayerId, model: vector::linework::InterpolationModel) -> Result<()> {
-    let paths = {
+fn refresh_linework_cache(
+    doc: &mut photocraft_doc::Document,
+    layer_id: photocraft_doc::LayerId,
+    changed_paths: &[u64],
+    model: vector::linework::InterpolationModel,
+) -> Result<()> {
+    let (paths, mut path_caches, previous_cache) = {
         let layer = doc.layer(layer_id).ok_or(EngineError::NoLayer(layer_id))?;
         let LayerContent::Linework(linework) = &layer.content else { return Err(EngineError::Other("layer is not Linework".into())) };
-        linework.paths.clone()
+        (linework.paths.clone(), linework.path_caches.clone(), linework.cache.clone())
     };
     let bounds = doc.bounds();
     let format = doc.pixel_format();
-    let mut cache = None;
-    for path in paths {
+    let changed: std::collections::BTreeSet<_> = changed_paths.iter().copied().collect();
+    let valid: std::collections::BTreeSet<_> = paths.iter().map(|path| path.id).collect();
+    let can_patch = previous_cache.is_some() && paths.iter().all(|path| path_caches.contains_key(&path.id));
+    let mut damage = photocraft_geom::Rect::EMPTY;
+    if can_patch {
+        for id in changed_paths {
+            if let Some(old) = path_caches.get(id) {
+                damage = damage.union(&old.tile_bounds());
+            }
+        }
+    }
+    path_caches.retain(|id, _| valid.contains(id));
+    for path in &paths {
+        if path_caches.contains_key(&path.id) && !changed.contains(&path.id) {
+            continue;
+        }
         let points: Vec<[f64; 2]> = path.points.iter().map(|point| point.position).collect();
         let factors: Vec<f32> = path.points.iter().map(|point| point.width_factor).collect();
         let mut shape = render_shape(&points, &factors, path.color, path.width, path.handle, model)?;
         crate::vector_cmds::refresh_shape(doc, &mut shape);
         let rendered = shape.cache.ok_or(EngineError::Other("linework render cache missing".into()))?;
-        cache = Some(composite_cache(bounds, format, cache, rendered));
+        if changed.contains(&path.id) {
+            damage = damage.union(&rendered.tile_bounds());
+        }
+        path_caches.insert(path.id, rendered);
     }
+    let region = if can_patch { bounds.intersect(&damage) } else { bounds };
+    let mut cache = None;
+    if !region.is_empty() {
+        for path in paths {
+            let rendered = path_caches.get(&path.id).ok_or(EngineError::Other("linework path render cache missing".into()))?;
+            // Clipping every blend to the affected tiles preserves the rest of the layer cache.
+            cache = Some(composite_cache(region, cache, rendered.clone()));
+        }
+    }
+    let cache = if let (true, Some(mut previous)) = (can_patch, previous_cache) {
+        if !region.is_empty() {
+            let pixels = cache.unwrap_or_else(|| Surface::new(format)).read_region(region);
+            previous.write_region(region, &pixels);
+        }
+        Some(previous)
+    } else {
+        cache
+    };
     let layer = doc.layer_mut(layer_id).ok_or(EngineError::NoLayer(layer_id))?;
     let LayerContent::Linework(linework) = &mut layer.content else { return Err(EngineError::Other("layer is not Linework".into())) };
     linework.cache = cache;
+    linework.path_caches = path_caches;
     Ok(())
 }
 
@@ -202,16 +247,17 @@ fn create(s: &mut Session, p: &Value) -> Result<Value> {
         let name = requested_name.unwrap_or_else(|| doc.next_layer_name("Linework"));
         let rendered = shape.cache.take().ok_or(EngineError::Other("linework render cache missing".into()))?;
         let bounds = doc.bounds();
-        let format = doc.pixel_format();
         if let Some(active_id) = *active
             && let Some(layer) = doc.layer_mut(active_id)
             && let LayerContent::Linework(linework) = &mut layer.content
         {
-            linework.cache = Some(composite_cache(bounds, format, linework.cache.take(), rendered));
+            linework.path_caches.insert(line.id, rendered.clone());
+            linework.cache = Some(composite_cache(bounds, linework.cache.take(), rendered));
             linework.paths.push(line);
             return Ok(active_id);
         }
-        let id = doc.insert_above(*active, Layer::new(name, LayerContent::Linework(LineworkLayer { paths: vec![line], cache: Some(rendered) })));
+        let path_caches = std::iter::once((line.id, rendered.clone())).collect();
+        let id = doc.insert_above(*active, Layer::new(name, LayerContent::Linework(LineworkLayer { paths: vec![line], cache: Some(rendered), path_caches })));
         *active = Some(id);
         Ok(id)
     })?;
@@ -241,30 +287,15 @@ fn move_point(s: &mut Session, p: &Value) -> Result<Value> {
         return Err(EngineError::BadParams { cmd: MOVE_CMD.into(), msg: "point coordinates must be finite and within ±1000000 px".into() });
     }
     s.edit("Move Linework Point", |doc, _| {
-        let (points, factors, color, width, handle) = {
+        {
             let photocraft_doc::LayerContent::Linework(linework) = &mut doc.layer_mut(layer).ok_or(EngineError::NoLayer(layer))?.content else {
                 return Err(EngineError::Other("layer is not Linework".into()));
             };
             let path = linework.paths.iter_mut().find(|path| path.id == path_id).ok_or_else(|| EngineError::Other("linework path not found".into()))?;
             let point = path.points.iter_mut().find(|point| point.id == point_id).ok_or_else(|| EngineError::Other("linework point not found".into()))?;
             point.position = [x, y];
-            (
-                path.points.iter().map(|point| point.position).collect::<Vec<_>>(),
-                path.points.iter().map(|point| point.width_factor).collect::<Vec<_>>(),
-                path.color,
-                path.width,
-                path.handle,
-            )
         };
-        let mut shape = render_shape(&points, &factors, color, width, handle, model)?;
-        crate::vector_cmds::refresh_shape(doc, &mut shape);
-        if let photocraft_doc::LayerContent::Linework(linework) = &mut doc.layer_mut(layer).ok_or(EngineError::NoLayer(layer))?.content
-            && let Some(path) = linework.paths.iter_mut().find(|path| path.id == path_id)
-        {
-            path.handle = handle;
-            linework.cache = shape.cache;
-        }
-        refresh_linework_cache(doc, layer, model)?;
+        refresh_linework_cache(doc, layer, &[path_id], model)?;
         Ok(())
     })?;
     Ok(json!({"layer": layer.0, "path": path_id, "point": point_id, "x": x, "y": y}))
@@ -305,19 +336,20 @@ fn move_points(s: &mut Session, p: &Value) -> Result<Value> {
         moves.push((layer, path, point, x, y));
     }
     s.edit("Move Linework Points", |doc, _| {
-        let mut layers = Vec::new();
+        let mut layers: std::collections::BTreeMap<photocraft_doc::LayerId, Vec<u64>> = Default::default();
         for (layer_id, path_id, point_id, x, y) in &moves {
             let layer = doc.layer_mut(*layer_id).ok_or(EngineError::NoLayer(*layer_id))?;
             let LayerContent::Linework(linework) = &mut layer.content else { return Err(EngineError::Other("layer is not Linework".into())) };
             let path = linework.paths.iter_mut().find(|path| path.id == *path_id).ok_or_else(|| EngineError::Other("linework path not found".into()))?;
             let point = path.points.iter_mut().find(|point| point.id == *point_id).ok_or_else(|| EngineError::Other("linework point not found".into()))?;
             point.position = [*x, *y];
-            if !layers.contains(layer_id) {
-                layers.push(*layer_id);
+            let changed = layers.entry(*layer_id).or_default();
+            if !changed.contains(path_id) {
+                changed.push(*path_id);
             }
         }
-        for layer in layers {
-            refresh_linework_cache(doc, layer, model)?;
+        for (layer, paths) in layers {
+            refresh_linework_cache(doc, layer, &paths, model)?;
         }
         Ok(())
     })?;
@@ -333,7 +365,7 @@ fn delete_point(s: &mut Session, p: &Value) -> Result<Value> {
     let point_id =
         p.get("point").and_then(Value::as_u64).ok_or_else(|| EngineError::BadParams { cmd: DELETE_CMD.into(), msg: "`point` is required".into() })?;
     s.edit("Delete Linework Point", |doc, _| {
-        let (points, factors, color, width, handle) = {
+        {
             let photocraft_doc::LayerContent::Linework(linework) = &mut doc.layer_mut(layer).ok_or(EngineError::NoLayer(layer))?.content else {
                 return Err(EngineError::Other("layer is not Linework".into()));
             };
@@ -346,20 +378,8 @@ fn delete_point(s: &mut Session, p: &Value) -> Result<Value> {
             if path.points.len() == before {
                 return Err(EngineError::Other("linework point not found".into()));
             }
-            (
-                path.points.iter().map(|point| point.position).collect::<Vec<_>>(),
-                path.points.iter().map(|point| point.width_factor).collect::<Vec<_>>(),
-                path.color,
-                path.width,
-                path.handle,
-            )
         };
-        let mut shape = render_shape(&points, &factors, color, width, handle, model)?;
-        crate::vector_cmds::refresh_shape(doc, &mut shape);
-        if let photocraft_doc::LayerContent::Linework(linework) = &mut doc.layer_mut(layer).ok_or(EngineError::NoLayer(layer))?.content {
-            linework.cache = shape.cache;
-        }
-        refresh_linework_cache(doc, layer, model)?;
+        refresh_linework_cache(doc, layer, &[path_id], model)?;
         Ok(())
     })?;
     Ok(json!({"layer": layer.0, "path": path_id, "point": point_id}))
@@ -380,7 +400,7 @@ fn insert_point(s: &mut Session, p: &Value) -> Result<Value> {
     let x = p.get("x").and_then(Value::as_f64).ok_or_else(|| EngineError::BadParams { cmd: INSERT_CMD.into(), msg: "`x` is required".into() })?;
     let y = p.get("y").and_then(Value::as_f64).ok_or_else(|| EngineError::BadParams { cmd: INSERT_CMD.into(), msg: "`y` is required".into() })?;
     s.edit("Insert Linework Point", |doc, _| {
-        let (points, factors, color, width, handle, id) = {
+        let id = {
             let photocraft_doc::LayerContent::Linework(linework) = &mut doc.layer_mut(layer).ok_or(EngineError::NoLayer(layer))?.content else {
                 return Err(EngineError::Other("layer is not Linework".into()));
             };
@@ -392,21 +412,9 @@ fn insert_point(s: &mut Session, p: &Value) -> Result<Value> {
             point.width_factor = width_factor;
             let id = point.id;
             path.points.insert(index, point);
-            (
-                path.points.iter().map(|point| point.position).collect::<Vec<_>>(),
-                path.points.iter().map(|point| point.width_factor).collect::<Vec<_>>(),
-                path.color,
-                path.width,
-                path.handle,
-                id,
-            )
+            id
         };
-        let mut shape = render_shape(&points, &factors, color, width, handle, model)?;
-        crate::vector_cmds::refresh_shape(doc, &mut shape);
-        if let photocraft_doc::LayerContent::Linework(linework) = &mut doc.layer_mut(layer).ok_or(EngineError::NoLayer(layer))?.content {
-            linework.cache = shape.cache;
-        }
-        refresh_linework_cache(doc, layer, model)?;
+        refresh_linework_cache(doc, layer, &[path_id], model)?;
         Ok(id)
     })
     .map(|id| json!({"layer": layer.0, "path": path_id, "point": id, "x": x, "y": y}))
@@ -424,27 +432,15 @@ fn set_point_width(s: &mut Session, p: &Value) -> Result<Value> {
         return Err(EngineError::BadParams { cmd: WIDTH_CMD.into(), msg: "`factor` must be between 0 and 1000".into() });
     }
     s.edit("Set Linework Point Width", |doc, _| {
-        let (points, factors, color, width, handle) = {
+        {
             let photocraft_doc::LayerContent::Linework(linework) = &mut doc.layer_mut(layer).ok_or(EngineError::NoLayer(layer))?.content else {
                 return Err(EngineError::Other("layer is not Linework".into()));
             };
             let path = linework.paths.iter_mut().find(|path| path.id == path_id).ok_or_else(|| EngineError::Other("linework path not found".into()))?;
             let point = path.points.iter_mut().find(|point| point.id == point_id).ok_or_else(|| EngineError::Other("linework point not found".into()))?;
             point.width_factor = factor as f32;
-            (
-                path.points.iter().map(|point| point.position).collect::<Vec<_>>(),
-                path.points.iter().map(|point| point.width_factor).collect::<Vec<_>>(),
-                path.color,
-                path.width,
-                path.handle,
-            )
         };
-        let mut shape = render_shape(&points, &factors, color, width, handle, model)?;
-        crate::vector_cmds::refresh_shape(doc, &mut shape);
-        if let photocraft_doc::LayerContent::Linework(linework) = &mut doc.layer_mut(layer).ok_or(EngineError::NoLayer(layer))?.content {
-            linework.cache = shape.cache;
-        }
-        refresh_linework_cache(doc, layer, model)?;
+        refresh_linework_cache(doc, layer, &[path_id], model)?;
         Ok(())
     })?;
     Ok(json!({"layer": layer.0, "path": path_id, "point": point_id, "factor": factor}))
@@ -461,25 +457,14 @@ fn set_path_color(s: &mut Session, p: &Value) -> Result<Value> {
         .and_then(crate::vector_cmds::color)
         .ok_or_else(|| EngineError::BadParams { cmd: COLOR_CMD.into(), msg: "`color` must be #rrggbb, #rrggbbaa or [r,g,b,a]".into() })?;
     s.edit("Set Linework Path Color", |doc, _| {
-        let (points, factors, width, handle) = {
+        {
             let photocraft_doc::LayerContent::Linework(linework) = &mut doc.layer_mut(layer).ok_or(EngineError::NoLayer(layer))?.content else {
                 return Err(EngineError::Other("layer is not Linework".into()));
             };
             let path = linework.paths.iter_mut().find(|path| path.id == path_id).ok_or_else(|| EngineError::Other("linework path not found".into()))?;
             path.color = color;
-            (
-                path.points.iter().map(|point| point.position).collect::<Vec<_>>(),
-                path.points.iter().map(|point| point.width_factor).collect::<Vec<_>>(),
-                path.width,
-                path.handle,
-            )
         };
-        let mut shape = render_shape(&points, &factors, color, width, handle, model)?;
-        crate::vector_cmds::refresh_shape(doc, &mut shape);
-        if let photocraft_doc::LayerContent::Linework(linework) = &mut doc.layer_mut(layer).ok_or(EngineError::NoLayer(layer))?.content {
-            linework.cache = shape.cache;
-        }
-        refresh_linework_cache(doc, layer, model)?;
+        refresh_linework_cache(doc, layer, &[path_id], model)?;
         Ok(())
     })?;
     let rgb = color.to_rgb();
@@ -498,7 +483,14 @@ fn set_interpolation(s: &mut Session, p: &Value) -> Result<Value> {
     let clean = st.saved_revision == st.revision;
     let mut doc = (*st.doc).clone();
     for layer in layers {
-        refresh_linework_cache(&mut doc, layer, model)?;
+        let all_paths: Vec<u64> = match &doc.layer(layer).ok_or(EngineError::NoLayer(layer))?.content {
+            LayerContent::Linework(linework) => linework.paths.iter().map(|path| path.id).collect(),
+            _ => return Err(EngineError::Other("layer is not Linework".into())),
+        };
+        if let LayerContent::Linework(linework) = &mut doc.layer_mut(layer).ok_or(EngineError::NoLayer(layer))?.content {
+            linework.path_caches.clear();
+        }
+        refresh_linework_cache(&mut doc, layer, &all_paths, model)?;
     }
     st.doc = std::sync::Arc::new(doc);
     st.revision = st.revision.wrapping_add(1);

@@ -221,3 +221,51 @@ fn selected_interpolation_is_used_by_edits_and_survives_undo_redo_and_save() {
     assert_eq!(loaded_linework.paths[0].points[1].position, [30.0, 55.0]);
     assert_eq!(loaded_linework.cache, redone_cache);
 }
+
+#[test]
+fn incremental_linework_cache_matches_full_rebuild_after_drag_and_pressure() {
+    let mut s = Session::new();
+    s.execute("file.new", json!({"width": 256, "height": 192})).unwrap();
+    let layer = s.execute("linework.create", json!({"points": [[8, 15], [70, 90], [120, 20]], "width": 12})).unwrap()["layer"].as_u64().unwrap();
+    s.execute("linework.create", json!({"points": [[25, 130], [95, 70], [180, 140]], "width": 7})).unwrap();
+    s.execute("linework.create", json!({"points": [[130, 18], [220, 90], [230, 160]], "width": 5})).unwrap();
+    let ids = || {
+        let LayerContent::Linework(linework) = &s.active().unwrap().doc.layer(photocraft_doc::LayerId(layer)).unwrap().content else { panic!() };
+        linework.paths.iter().map(|path| (path.id, path.points[1].id)).collect::<Vec<_>>()
+    };
+    let ids = ids();
+    let assert_rebuild_equal = |s: &mut Session| {
+        let before = {
+            let LayerContent::Linework(linework) = &s.active().unwrap().doc.layer(photocraft_doc::LayerId(layer)).unwrap().content else { panic!() };
+            linework.cache.clone().unwrap()
+        };
+        s.execute("linework.setInterpolation", json!({"interpolation": "saiSimplified"})).unwrap();
+        let LayerContent::Linework(linework) = &s.active().unwrap().doc.layer(photocraft_doc::LayerId(layer)).unwrap().content else { panic!() };
+        let bounds = s.active().unwrap().doc.bounds();
+        assert_eq!(before.read_region(bounds), linework.cache.as_ref().unwrap().read_region(bounds));
+    };
+    s.execute("linework.movePoint", json!({"layer": layer, "path": ids[1].0, "point": ids[1].1, "x": 105, "y": 60})).unwrap();
+    assert_rebuild_equal(&mut s);
+    s.execute("linework.setPointWidth", json!({"layer": layer, "path": ids[0].0, "point": ids[0].1, "factor": 2.0})).unwrap();
+    assert_rebuild_equal(&mut s);
+    s.execute(
+        "linework.movePoints",
+        json!({"points": [
+            {"layer": layer, "path": ids[0].0, "point": ids[0].1, "x": 76, "y": 96},
+            {"layer": layer, "path": ids[2].0, "point": ids[2].1, "x": 205, "y": 82}
+        ]}),
+    )
+    .unwrap();
+    assert_rebuild_equal(&mut s);
+    s.execute("layer.translate", json!({"layer": layer, "dx": 3, "dy": -2})).unwrap();
+    s.execute("linework.setPointWidth", json!({"layer": layer, "path": ids[1].0, "point": ids[1].1, "factor": 1.5})).unwrap();
+    assert_rebuild_equal(&mut s);
+    let cache = {
+        let LayerContent::Linework(linework) = &s.active().unwrap().doc.layer(photocraft_doc::LayerId(layer)).unwrap().content else { panic!() };
+        linework.cache.clone()
+    };
+    assert!(s.undo());
+    assert!(s.redo());
+    let LayerContent::Linework(linework) = &s.active().unwrap().doc.layer(photocraft_doc::LayerId(layer)).unwrap().content else { panic!() };
+    assert_eq!(linework.cache, cache);
+}

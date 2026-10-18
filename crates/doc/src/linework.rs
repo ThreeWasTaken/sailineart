@@ -88,12 +88,21 @@ impl LineworkPath {
 }
 
 /// A persistent SaiLine layer containing multiple independent strokes.
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct LineworkLayer {
     pub paths: Vec<LineworkPath>,
     /// Optional rendered cache; the point list remains canonical.
     #[serde(skip)]
     pub cache: Option<Surface>,
+    /// Transient raster per path. Kept out of the file and logical equality.
+    #[serde(skip)]
+    pub path_caches: std::collections::BTreeMap<u64, Surface>,
+}
+
+impl PartialEq for LineworkLayer {
+    fn eq(&self, other: &Self) -> bool {
+        self.paths == other.paths && self.cache == other.cache
+    }
 }
 
 impl LineworkLayer {
@@ -140,7 +149,7 @@ impl LineworkLayer {
     }
 
     pub fn duplicate(&self) -> Self {
-        Self { paths: self.paths.iter().map(LineworkPath::duplicate).collect(), cache: self.cache.clone() }
+        Self { paths: self.paths.iter().map(LineworkPath::duplicate).collect(), cache: self.cache.clone(), path_caches: Default::default() }
     }
 }
 
@@ -209,7 +218,7 @@ mod tests {
     #[test]
     fn serde_round_trip_preserves_logical_data() {
         let path = LineworkPath::new(vec![[0.0, 0.0], [10.0, 5.0], [20.0, 0.0]], color(), 4.0).unwrap();
-        let layer = LineworkLayer { paths: vec![path], cache: None };
+        let layer = LineworkLayer { paths: vec![path], cache: None, path_caches: Default::default() };
         let json = serde_json::to_string(&layer).unwrap();
         let decoded: LineworkLayer = serde_json::from_str(&json).unwrap();
         assert_eq!(decoded, layer);

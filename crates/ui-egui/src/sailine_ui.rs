@@ -38,6 +38,12 @@ pub struct PointDrag {
     pub origins: Vec<[f64; 2]>,
     pub start: [f64; 2],
     pub key: u64,
+    #[serde(skip)]
+    last_preview_at: Option<Instant>,
+    #[serde(skip)]
+    pending_point: Option<[f64; 2]>,
+    #[serde(skip)]
+    rendered_point: Option<[f64; 2]>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -139,12 +145,34 @@ pub fn begin_drag(app: &mut PhotocraftApp, point: [f64; 2]) -> bool {
     }
     app.ui.sailine_selection = Some(selection);
     let origins = app.ui.sailine_selections.iter().filter_map(|candidate| point_position(app, *candidate)).collect();
-    app.ui.sailine_point_drag =
-        Some(PointDrag { selections: app.ui.sailine_selections.clone(), origins, start: point, key: NEXT_DRAG.fetch_add(1, Ordering::Relaxed) });
+    app.ui.sailine_point_drag = Some(PointDrag {
+        selections: app.ui.sailine_selections.clone(),
+        origins,
+        start: point,
+        key: NEXT_DRAG.fetch_add(1, Ordering::Relaxed),
+        last_preview_at: None,
+        pending_point: None,
+        rendered_point: Some(point),
+    });
     true
 }
 
 pub fn drag_to(app: &mut PhotocraftApp, point: [f64; 2]) -> bool {
+    let Some(drag) = app.ui.sailine_point_drag.as_mut() else { return false };
+    drag.pending_point = Some(point);
+    if drag.rendered_point == Some(point) {
+        return true;
+    }
+    let now = Instant::now();
+    if drag.last_preview_at.is_some_and(|last| now.duration_since(last) < Duration::from_millis(33)) {
+        return true;
+    }
+    drag.last_preview_at = Some(now);
+    drag.rendered_point = Some(point);
+    render_drag(app, point)
+}
+
+fn render_drag(app: &mut PhotocraftApp, point: [f64; 2]) -> bool {
     let Some(drag) = app.ui.sailine_point_drag.clone() else { return false };
     let dx = point[0] - drag.start[0];
     let dy = point[1] - drag.start[1];
@@ -160,6 +188,12 @@ pub fn drag_to(app: &mut PhotocraftApp, point: [f64; 2]) -> bool {
 }
 
 pub fn end_drag(app: &mut PhotocraftApp) {
+    if let Some(drag) = &app.ui.sailine_point_drag
+        && let Some(point) = drag.pending_point
+        && drag.rendered_point != Some(point)
+    {
+        render_drag(app, point);
+    }
     app.ui.sailine_point_drag = None;
 }
 
@@ -571,6 +605,23 @@ mod tests {
         let positions: Vec<_> = linework.paths[0].points.iter().map(|point| point.position).collect();
         assert_eq!(positions[0], [30.0, 50.0]);
         assert_eq!(positions[1], [110.0, 160.0]);
+    }
+
+    #[test]
+    fn throttled_point_drag_commits_exact_release_position() {
+        let mut app = app();
+        app.run("linework.create", json!({"points": [[20.0, 30.0], [100.0, 140.0]], "width": 3.0})).unwrap();
+        assert!(begin_drag(&mut app, [20.0, 30.0]));
+        assert!(drag_to(&mut app, [30.0, 40.0]));
+        assert!(drag_to(&mut app, [45.0, 55.0]));
+        end_drag(&mut app);
+        let layer = app.session.active().unwrap().doc.layer(app.session.active().unwrap().active_layer.unwrap()).unwrap();
+        let photocraft_doc::LayerContent::Linework(linework) = &layer.content else { panic!("linework expected") };
+        assert_eq!(linework.paths[0].points[0].position, [45.0, 55.0]);
+        assert!(app.session.undo());
+        let layer = app.session.active().unwrap().doc.layer(app.session.active().unwrap().active_layer.unwrap()).unwrap();
+        let photocraft_doc::LayerContent::Linework(linework) = &layer.content else { panic!("linework expected") };
+        assert_eq!(linework.paths[0].points[0].position, [20.0, 30.0]);
     }
 
     #[test]

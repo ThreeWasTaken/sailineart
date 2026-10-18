@@ -149,3 +149,29 @@ reconstruit plus le cache à chaque mouvement : l'aperçu moteur est plafonné �
 par seconde, et la valeur exacte du relâchement est toujours calculée puis enregistrée. Le test UI
 vérifie que les mises à jour rapides sont sautées et que le relâchement valide bien la dernière
 valeur.
+
+## Suivi — fluidité des déplacements et de la pression (2026-10-18)
+
+Les éditions de points et de pression ne rasterisent plus deux fois le tracé modifié. Chaque
+tracé possède un cache raster temporaire (non enregistré) ; pendant un glisser, seuls les tracés
+modifiés sont rendus à nouveau, puis leur ancienne et nouvelle zone est recomposée. Les
+translations de calque déplacent aussi ces caches, et le chargement ou la duplication les
+reconstruisent à la première édition. Le glisser de points est plafonné à 30 aperçus par seconde,
+avec application de la position exacte au relâchement et une seule étape d'annulation.
+
+Un test compare les pixels après déplacement simple, déplacement multiple et changement de
+pression avec un rendu complet, puis vérifie annuler/rétablir. Un essai local sur 12 tracés dans
+un document 800×600 a mesuré 25,2 ms par déplacement avec cache incrémental contre 75,9 ms
+en forçant la reconstruction complète ; ce chiffre dépend de la machine et de la géométrie.
+Tests ciblés, Clippy, compilation native, vérification wasm et contrôle des couches : réussis.
+La suite de performance générale s'arrête sur le benchmark bevel sous llvmpipe
+(`Rgba32Float` non rendable sur cet adaptateur) ; cela ne concerne pas SaiCurve.
+
+## Suivi — retour court près d'une extrémité (2026-10-18)
+
+Un tracé de trois points dont le point central revient presque sur une extrémité produisait une
+excroissance noire avec une forte épaisseur. Le contour offset suivait le petit retour, pourtant
+entièrement couvert par le cap rond. Le rendu fusionne progressivement ce retour avec le cap
+quand il est court, inversé et à pression comparable ; les points enregistrés et la formule
+d'interpolation SAI simplifiée restent inchangés. La reproduction de la capture et son tracé
+inversé ne présentent plus de pointe ; un test raster protège ce cas.

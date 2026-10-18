@@ -339,14 +339,61 @@ pub fn variable_width_shape_with_model(
     if factors.iter().any(|factor| !factor.is_finite() || *factor < 0.0) {
         return Err("linework width factors must be finite and non-negative".into());
     }
-    let center = interpolate_points_with_model(points, handle, model)?;
+    // A very short endpoint return is wholly covered by the round cap at ordinary pressure.
+    // Drawing its offset normals nevertheless folds the outline back on itself and produces
+    // a visible spur. Keep the canonical points and interpolation untouched; only merge this
+    // covered portion of the *raster outline* into the endpoint, fading the merge out smoothly.
+    let mut outline_points = points.to_vec();
+    if points.len() >= 3 {
+        let endpoint_overlap = |end: usize, adjacent: usize, following: usize| {
+            let pressure_similarity = 1.0 - smoothstep01((f64::from((factors[end] - factors[adjacent]).abs()) - 0.02) / 0.08);
+            if pressure_similarity <= 0.0 {
+                return 0.0;
+            }
+            let short = (points[adjacent][0] - points[end][0]).hypot(points[adjacent][1] - points[end][1]);
+            if short <= 1e-9 {
+                return pressure_similarity;
+            }
+            let next = (points[following][0] - points[adjacent][0]).hypot(points[following][1] - points[adjacent][1]);
+            let diameter = width * f64::from((factors[end] + factors[adjacent]) * 0.5);
+            if next <= 1e-9 || diameter <= 1e-9 {
+                return 0.0;
+            }
+            let incoming = [points[adjacent][0] - points[end][0], points[adjacent][1] - points[end][1]];
+            let outgoing = [points[following][0] - points[adjacent][0], points[following][1] - points[adjacent][1]];
+            let cosine = (incoming[0] * outgoing[0] + incoming[1] * outgoing[1]) / (short * next);
+            let reversal = smoothstep01(-cosine / 0.2);
+            let covered = 1.0 - smoothstep01(short / diameter - 1.0);
+            let local = 1.0 - smoothstep01((short / next - 0.03) / 0.07);
+            reversal * covered * local * pressure_similarity
+        };
+        let first = endpoint_overlap(0, 1, 2);
+        let last = endpoint_overlap(points.len() - 1, points.len() - 2, points.len() - 3);
+        let (end, adjacent, amount) = if last > first { (points.len() - 1, points.len() - 2, last) } else { (0, 1, first) };
+        if amount > 0.0 {
+            outline_points[adjacent][0] += (points[end][0] - points[adjacent][0]) * amount;
+            outline_points[adjacent][1] += (points[end][1] - points[adjacent][1]) * amount;
+        }
+        if points.len() > 3 {
+            let (end, adjacent, amount) = if last > first { (0, 1, first) } else { (points.len() - 1, points.len() - 2, last) };
+            if amount > 0.0 {
+                outline_points[adjacent][0] += (points[end][0] - points[adjacent][0]) * amount;
+                outline_points[adjacent][1] += (points[end][1] - points[adjacent][1]) * amount;
+            }
+        }
+    }
+    let center = interpolate_points_with_model(&outline_points, handle, model)?;
     let segments = center.subpaths.first().ok_or("linework path has no subpath")?.segments();
     let mut samples = Vec::new();
+    let last_visible = outline_points.windows(2).rposition(|pair| (pair[1][0] - pair[0][0]).hypot(pair[1][1] - pair[0][1]) > 1e-9);
     for (index, segment) in segments.iter().enumerate() {
-        let segment_length = (points[index + 1][0] - points[index][0]).hypot(points[index + 1][1] - points[index][1]);
+        let segment_length = (outline_points[index + 1][0] - outline_points[index][0]).hypot(outline_points[index + 1][1] - outline_points[index][1]);
+        if segment_length <= 1e-9 {
+            continue;
+        }
         let minimum_radius = (width * 0.25).max(0.25);
         let sample_count = ((segment_length / minimum_radius).ceil() as usize + 1).clamp(64, 512);
-        let steps = if index + 1 == segments.len() { sample_count } else { sample_count - 1 };
+        let steps = if Some(index) == last_visible { sample_count } else { sample_count - 1 };
         for step in 0..steps {
             let t = step as f64 / (sample_count - 1) as f64;
             let u = 1.0 - t;
@@ -372,7 +419,7 @@ pub fn variable_width_shape_with_model(
     }
     right.reverse();
     left.extend(right);
-    let mut subpaths = vec![Subpath::polygon(&left).with_op(PathOp::Combine)];
+    let mut subpaths = if left.len() >= 3 { vec![Subpath::polygon(&left).with_op(PathOp::Combine)] } else { Vec::new() };
     // Round open endpoints with their actual effective radius. The sampled side outline closes
     // with a diameter; these unions turn that butt closure into the round cap SAI shows.
     for index in [0, points.len().saturating_sub(1)] {
@@ -388,7 +435,7 @@ pub fn variable_width_shape_with_model(
             .collect();
         subpaths.push(Subpath::polygon(&circle).with_op(PathOp::Combine));
     }
-    for (index, point) in points.iter().enumerate() {
+    for (index, point) in outline_points.iter().enumerate() {
         if index == 0 || index + 1 == points.len() {
             continue;
         }
@@ -727,5 +774,41 @@ mod tests {
         let xs: Vec<_> = cap.knots.iter().map(|knot| knot.anchor.x).collect();
         assert!((xs.iter().copied().fold(f64::NEG_INFINITY, f64::max) - 98.0).abs() < 0.1);
         assert!((xs.iter().copied().fold(f64::INFINITY, f64::min) - 82.0).abs() < 0.1);
+    }
+
+    #[test]
+    fn thick_short_endpoint_return_merges_into_its_round_cap_without_a_spur() {
+        use photocraft_color::PixelFormat;
+        use photocraft_geom::Rect;
+
+        let points = [[64.0, 43.0], [58.0, 50.0], [756.0, 120.0]];
+        let canonical = interpolate_points_with_model(&points, None, InterpolationModel::SaiSimplified).unwrap();
+        assert_eq!(canonical.subpaths[0].knots[1].anchor, Point::new(58.0, 50.0));
+        let mut masks = Vec::new();
+        for order in [points.to_vec(), points.into_iter().rev().collect()] {
+            let shape = variable_width_shape_with_model(&order, &[1.0; 3], 16.0, Color::BLACK, None, InterpolationModel::SaiSimplified).unwrap();
+            let raster = crate::render_shape(&shape, PixelFormat::RGBA8, Rect::new(0, 0, 800, 170));
+            let spur_area = raster.read_region(Rect::new(48, 30, 56, 42));
+            assert!(spur_area.as_chunks::<4>().0.iter().all(|pixel| pixel[3] == 0.0), "short return must stay inside the round cap");
+            let cap = raster.read_region(Rect::new(64, 43, 65, 44));
+            assert!(cap[3] > 0.9);
+            masks.push(raster.read_region(Rect::new(0, 0, 800, 170)));
+        }
+        let mean_alpha_difference =
+            masks[0].as_chunks::<4>().0.iter().zip(masks[1].as_chunks::<4>().0.iter()).map(|(a, b)| (a[3] - b[3]).abs()).sum::<f32>() / (800 * 170) as f32;
+        assert!(mean_alpha_difference < 0.002, "outline should remain reversible: {mean_alpha_difference}");
+        assert!(variable_width_shape_with_model(&points, &[1.0, 0.5, 1.0], 16.0, Color::BLACK, None, InterpolationModel::SaiSimplified).is_ok());
+    }
+
+    #[test]
+    fn coincident_endpoint_points_keep_a_visible_cap() {
+        use photocraft_color::PixelFormat;
+        use photocraft_geom::Rect;
+
+        for points in [[[32.0, 32.0], [32.0, 32.0], [120.0, 50.0]], [[32.0, 32.0]; 3]] {
+            let shape = variable_width_shape_with_model(&points, &[1.0; 3], 12.0, Color::BLACK, None, InterpolationModel::SaiSimplified).unwrap();
+            let raster = crate::render_shape(&shape, PixelFormat::RGBA8, Rect::new(0, 0, 160, 80));
+            assert!(raster.read_region(Rect::new(32, 32, 33, 33))[3] > 0.9);
+        }
     }
 }
