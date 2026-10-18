@@ -83,6 +83,22 @@ fn width_factors(p: &Value, count: usize) -> Result<Vec<f32>> {
         .collect()
 }
 
+fn inserted_width_factor(p: &Value) -> Result<f32> {
+    if let Some(value) = p.get("pressurePercent") {
+        let percent = value.as_f64().ok_or_else(|| EngineError::BadParams { cmd: INSERT_CMD.into(), msg: "`pressurePercent` must be a number".into() })?;
+        if !percent.is_finite() || !(0.0..=200.0).contains(&percent) {
+            return Err(EngineError::BadParams { cmd: INSERT_CMD.into(), msg: "`pressurePercent` must be between 0 and 200".into() });
+        }
+        return Ok((percent / 100.0) as f32);
+    }
+    let Some(value) = p.get("factor") else { return Ok(1.0) };
+    let factor = value.as_f64().ok_or_else(|| EngineError::BadParams { cmd: INSERT_CMD.into(), msg: "`factor` must be a number".into() })?;
+    if !factor.is_finite() || !(0.0..=2.0).contains(&factor) {
+        return Err(EngineError::BadParams { cmd: INSERT_CMD.into(), msg: "`factor` must be between 0 and 2 (0–200%)".into() });
+    }
+    Ok(factor as f32)
+}
+
 fn handle(p: &Value) -> Result<Option<[f64; 2]>> {
     let Some(value) = p.get("handle") else { return Ok(None) };
     let a = value.as_array().ok_or_else(|| EngineError::BadParams { cmd: CMD.into(), msg: "`handle` must be [x, y]".into() })?;
@@ -95,7 +111,7 @@ fn handle(p: &Value) -> Result<Option<[f64; 2]>> {
 }
 
 fn interpolation(p: &Value, cmd: &str) -> Result<vector::linework::InterpolationModel> {
-    match p.get("interpolation").and_then(Value::as_str).unwrap_or("legacy") {
+    match p.get("interpolation").and_then(Value::as_str).unwrap_or("saiSimplified") {
         "legacy" => Ok(vector::linework::InterpolationModel::Legacy),
         "saiSimplified" => Ok(vector::linework::InterpolationModel::SaiSimplified),
         "saiOptimized" => Ok(vector::linework::InterpolationModel::SaiOptimized),
@@ -351,6 +367,7 @@ fn delete_point(s: &mut Session, p: &Value) -> Result<Value> {
 
 fn insert_point(s: &mut Session, p: &Value) -> Result<Value> {
     let model = interpolation(p, INSERT_CMD)?;
+    let width_factor = inserted_width_factor(p)?;
     let layer = photocraft_doc::LayerId(
         p.get("layer").and_then(Value::as_u64).ok_or_else(|| EngineError::BadParams { cmd: INSERT_CMD.into(), msg: "`layer` is required".into() })?,
     );
@@ -371,7 +388,8 @@ fn insert_point(s: &mut Session, p: &Value) -> Result<Value> {
             if index > path.points.len() {
                 return Err(EngineError::Other("point insertion index out of range".into()));
             }
-            let point = photocraft_doc::LineworkPoint::new([x, y]).map_err(EngineError::Other)?;
+            let mut point = photocraft_doc::LineworkPoint::new([x, y]).map_err(EngineError::Other)?;
+            point.width_factor = width_factor;
             let id = point.id;
             path.points.insert(index, point);
             (
@@ -548,7 +566,7 @@ pub fn specs() -> Vec<CommandSpec> {
             label: "Insert Linework Point",
             menu: &[],
             shortcut: None,
-            params: r##"{"layer":id,"path":id,"index":n,"x":px,"y":px,"interpolation":"legacy"|"saiSimplified"|"saiOptimized"?} → {layer,path,point,x,y}"##,
+            params: r##"{"layer":id,"path":id,"index":n,"x":px,"y":px,"pressurePercent":0..200? | "factor":0..2?,"interpolation":"legacy"|"saiSimplified"|"saiOptimized"?} → {layer,path,point,x,y}"##,
             enabled: has_doc,
             run: insert_point,
             journal: true,

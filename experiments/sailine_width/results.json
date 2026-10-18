@@ -1,0 +1,353 @@
+{
+  "scoring": "cross-section width error along curve normals; per-case mean/P95/max in screenshot px and width-normalized pressure error; aggregate is equally weighted over scored cases",
+  "screenshot_cases": 6,
+  "scored_cases": [
+    1,
+    2,
+    3,
+    4,
+    5,
+    6
+  ],
+  "excluded_cases": [],
+  "candidates_tested": 5,
+  "ranking": [
+    {
+      "candidate": {
+        "id": "linear_arc_length",
+        "hypothesis": "linear pressure in normalized centerline arc length"
+      },
+      "supported_cases": 6,
+      "balanced_mean_error_px": 1.3023077020564218,
+      "balanced_normalized_pressure_error_percent": 16.121650274159666,
+      "maximum_pressure_overshoot_percent": 0.0,
+      "cases": [
+        {
+          "case": 1,
+          "samples": 97,
+          "mean_width_error_px": 0.539004657039605,
+          "normalized_pressure_error_percent": 1.8741374461223677,
+          "p95_width_error_px": 1.0803212985164095,
+          "max_width_error_px": 1.2663630917595121,
+          "ambiguous_samples_excluded": 0
+        },
+        {
+          "case": 2,
+          "samples": 96,
+          "mean_width_error_px": 1.354948172766524,
+          "normalized_pressure_error_percent": 17.667002559522192,
+          "p95_width_error_px": 2.169422148583571,
+          "max_width_error_px": 2.359314189673654,
+          "ambiguous_samples_excluded": 0
+        },
+        {
+          "case": 3,
+          "samples": 470,
+          "mean_width_error_px": 1.3905602856282757,
+          "normalized_pressure_error_percent": 18.131344518664413,
+          "p95_width_error_px": 2.1693721427930175,
+          "max_width_error_px": 2.676194386286234,
+          "ambiguous_samples_excluded": 0
+        },
+        {
+          "case": 4,
+          "samples": 275,
+          "mean_width_error_px": 1.4666971358084062,
+          "normalized_pressure_error_percent": 19.12408354296223,
+          "p95_width_error_px": 2.1693721427930175,
+          "max_width_error_px": 2.811280182667101,
+          "ambiguous_samples_excluded": 0
+        },
+        {
+          "case": 5,
+          "samples": 291,
+          "mean_width_error_px": 1.446029258285028,
+          "normalized_pressure_error_percent": 18.854597630183825,
+          "p95_width_error_px": 2.1899547229539085,
+          "max_width_error_px": 2.6895232356243906,
+          "ambiguous_samples_excluded": 0
+        },
+        {
+          "case": 6,
+          "samples": 270,
+          "mean_width_error_px": 1.6166067028106912,
+          "normalized_pressure_error_percent": 21.078735947502995,
+          "p95_width_error_px": 3.891946685772087,
+          "max_width_error_px": 4.852325000452112,
+          "ambiguous_samples_excluded": 0
+        }
+      ]
+    },
+    {
+      "candidate": {
+        "id": "linear_bezier_parameter",
+        "hypothesis": "linear pressure per segment in its cubic Bezier parameter t"
+      },
+      "supported_cases": 6,
+      "balanced_mean_error_px": 1.3727278559771385,
+      "balanced_normalized_pressure_error_percent": 16.726158153806015,
+      "maximum_pressure_overshoot_percent": 0.0,
+      "cases": [
+        {
+          "case": 1,
+          "samples": 97,
+          "mean_width_error_px": 0.7358444342970405,
+          "normalized_pressure_error_percent": 2.558556017699642,
+          "p95_width_error_px": 1.6666386781770512,
+          "max_width_error_px": 1.94102994604863,
+          "ambiguous_samples_excluded": 0
+        },
+        {
+          "case": 2,
+          "samples": 96,
+          "mean_width_error_px": 1.3674527317838112,
+          "normalized_pressure_error_percent": 17.830047966427347,
+          "p95_width_error_px": 2.304869857027432,
+          "max_width_error_px": 2.6176079856129686,
+          "ambiguous_samples_excluded": 0
+        },
+        {
+          "case": 3,
+          "samples": 470,
+          "mean_width_error_px": 1.2602997182008642,
+          "normalized_pressure_error_percent": 16.432893002658414,
+          "p95_width_error_px": 2.1693721427930175,
+          "max_width_error_px": 2.5528407499326686,
+          "ambiguous_samples_excluded": 0
+        },
+        {
+          "case": 4,
+          "samples": 275,
+          "mean_width_error_px": 1.4244666377040316,
+          "normalized_pressure_error_percent": 18.573445272734872,
+          "p95_width_error_px": 2.21815467853616,
+          "max_width_error_px": 2.988073514252369,
+          "ambiguous_samples_excluded": 0
+        },
+        {
+          "case": 5,
+          "samples": 291,
+          "mean_width_error_px": 1.7773759154765978,
+          "normalized_pressure_error_percent": 23.174985936062797,
+          "p95_width_error_px": 2.893490064202993,
+          "max_width_error_px": 3.657445657045386,
+          "ambiguous_samples_excluded": 0
+        },
+        {
+          "case": 6,
+          "samples": 270,
+          "mean_width_error_px": 1.6709276984004864,
+          "normalized_pressure_error_percent": 21.78702072725301,
+          "p95_width_error_px": 4.2748054858374065,
+          "max_width_error_px": 5.848517585828429,
+          "ambiguous_samples_excluded": 0
+        }
+      ]
+    },
+    {
+      "candidate": {
+        "id": "monotone_cubic",
+        "hypothesis": "shape-preserving monotone cubic Hermite pressure"
+      },
+      "supported_cases": 6,
+      "balanced_mean_error_px": 1.4111201060141259,
+      "balanced_normalized_pressure_error_percent": 17.22674997960579,
+      "maximum_pressure_overshoot_percent": 0.0,
+      "cases": [
+        {
+          "case": 1,
+          "samples": 97,
+          "mean_width_error_px": 0.7358444342970408,
+          "normalized_pressure_error_percent": 2.558556017699644,
+          "p95_width_error_px": 1.6666386781770655,
+          "max_width_error_px": 1.94102994604863,
+          "ambiguous_samples_excluded": 0
+        },
+        {
+          "case": 2,
+          "samples": 96,
+          "mean_width_error_px": 1.3674527317838112,
+          "normalized_pressure_error_percent": 17.830047966427347,
+          "p95_width_error_px": 2.304869857027432,
+          "max_width_error_px": 2.6176079856129686,
+          "ambiguous_samples_excluded": 0
+        },
+        {
+          "case": 3,
+          "samples": 470,
+          "mean_width_error_px": 1.2396110627903758,
+          "normalized_pressure_error_percent": 16.163136169565743,
+          "p95_width_error_px": 2.4374436946832247,
+          "max_width_error_px": 3.2393687049132573,
+          "ambiguous_samples_excluded": 0
+        },
+        {
+          "case": 4,
+          "samples": 275,
+          "mean_width_error_px": 1.5055379364344383,
+          "normalized_pressure_error_percent": 19.63052396471864,
+          "p95_width_error_px": 3.1061281596463823,
+          "max_width_error_px": 3.9834966634097615,
+          "ambiguous_samples_excluded": 0
+        },
+        {
+          "case": 5,
+          "samples": 291,
+          "mean_width_error_px": 1.9967199587604778,
+          "normalized_pressure_error_percent": 26.034985936062796,
+          "p95_width_error_px": 3.671884132267513,
+          "max_width_error_px": 4.652868806202779,
+          "ambiguous_samples_excluded": 0
+        },
+        {
+          "case": 6,
+          "samples": 270,
+          "mean_width_error_px": 1.6215545120186106,
+          "normalized_pressure_error_percent": 21.143249823160573,
+          "p95_width_error_px": 3.7554969593046046,
+          "max_width_error_px": 4.677220394692508,
+          "ambiguous_samples_excluded": 0
+        }
+      ]
+    },
+    {
+      "candidate": {
+        "id": "local_cubic",
+        "hypothesis": "local cubic Hermite pressure with secant endpoint and centered interior tangents"
+      },
+      "supported_cases": 6,
+      "balanced_mean_error_px": 1.4300177700859846,
+      "balanced_normalized_pressure_error_percent": 17.473154296934634,
+      "maximum_pressure_overshoot_percent": 2.2296657367541606,
+      "cases": [
+        {
+          "case": 1,
+          "samples": 97,
+          "mean_width_error_px": 0.7358444342970408,
+          "normalized_pressure_error_percent": 2.558556017699644,
+          "p95_width_error_px": 1.6666386781770655,
+          "max_width_error_px": 1.94102994604863,
+          "ambiguous_samples_excluded": 0
+        },
+        {
+          "case": 2,
+          "samples": 96,
+          "mean_width_error_px": 1.3674527317838112,
+          "normalized_pressure_error_percent": 17.830047966427347,
+          "p95_width_error_px": 2.304869857027432,
+          "max_width_error_px": 2.6176079856129686,
+          "ambiguous_samples_excluded": 0
+        },
+        {
+          "case": 3,
+          "samples": 470,
+          "mean_width_error_px": 1.242006687237181,
+          "normalized_pressure_error_percent": 16.194372422054197,
+          "p95_width_error_px": 2.4550755874269026,
+          "max_width_error_px": 3.2393489538734848,
+          "ambiguous_samples_excluded": 0
+        },
+        {
+          "case": 4,
+          "samples": 275,
+          "mean_width_error_px": 1.5259822383426838,
+          "normalized_pressure_error_percent": 19.8970947025522,
+          "p95_width_error_px": 2.808973317487519,
+          "max_width_error_px": 3.6256316762586565,
+          "ambiguous_samples_excluded": 0
+        },
+        {
+          "case": 5,
+          "samples": 291,
+          "mean_width_error_px": 2.0280792245592343,
+          "normalized_pressure_error_percent": 26.44387554547133,
+          "p95_width_error_px": 3.671884132267513,
+          "max_width_error_px": 4.652868806202779,
+          "ambiguous_samples_excluded": 0
+        },
+        {
+          "case": 6,
+          "samples": 270,
+          "mean_width_error_px": 1.6807413042959565,
+          "normalized_pressure_error_percent": 21.91497912740309,
+          "p95_width_error_px": 3.666776222290606,
+          "max_width_error_px": 4.965941223141815,
+          "ambiguous_samples_excluded": 0
+        }
+      ]
+    },
+    {
+      "candidate": {
+        "id": "smoothstep",
+        "hypothesis": "cubic smoothstep pressure, zero derivatives at each anchor"
+      },
+      "supported_cases": 6,
+      "balanced_mean_error_px": 2.021775312953103,
+      "balanced_normalized_pressure_error_percent": 19.491377059511564,
+      "maximum_pressure_overshoot_percent": 0.0,
+      "cases": [
+        {
+          "case": 1,
+          "samples": 97,
+          "mean_width_error_px": 4.311074213215982,
+          "normalized_pressure_error_percent": 14.989751035503442,
+          "p95_width_error_px": 7.032745591112061,
+          "max_width_error_px": 7.475747393477356,
+          "ambiguous_samples_excluded": 0
+        },
+        {
+          "case": 2,
+          "samples": 96,
+          "mean_width_error_px": 1.6756082005029886,
+          "normalized_pressure_error_percent": 21.84804921844319,
+          "p95_width_error_px": 3.4420654909632162,
+          "max_width_error_px": 4.093532638260628,
+          "ambiguous_samples_excluded": 0
+        },
+        {
+          "case": 3,
+          "samples": 470,
+          "mean_width_error_px": 1.307428741636435,
+          "normalized_pressure_error_percent": 17.047402542136908,
+          "p95_width_error_px": 2.348765814519501,
+          "max_width_error_px": 3.2034577851183412,
+          "ambiguous_samples_excluded": 0
+        },
+        {
+          "case": 4,
+          "samples": 275,
+          "mean_width_error_px": 1.4476348317093488,
+          "normalized_pressure_error_percent": 18.875532504570245,
+          "p95_width_error_px": 2.4899784710665336,
+          "max_width_error_px": 3.5133647271870734,
+          "ambiguous_samples_excluded": 0
+        },
+        {
+          "case": 5,
+          "samples": 291,
+          "mean_width_error_px": 1.7773759154765973,
+          "normalized_pressure_error_percent": 23.17498593606279,
+          "p95_width_error_px": 2.9836063391418612,
+          "max_width_error_px": 3.7340166685190326,
+          "ambiguous_samples_excluded": 0
+        },
+        {
+          "case": 6,
+          "samples": 270,
+          "mean_width_error_px": 1.6115299751772654,
+          "normalized_pressure_error_percent": 21.012541120352807,
+          "p95_width_error_px": 3.772461610484463,
+          "max_width_error_px": 4.677220394692506,
+          "ambiguous_samples_excluded": 0
+        }
+      ]
+    }
+  ],
+  "identifiability": "All six control markers are visible and recorded. Centerlines are reconstructed with the validated production SaiSimplified formula. Width measurements use screenshot red masks sampled along local normals. Interpret remaining score differences against the ±1.5 px extraction/antialiasing uncertainty.",
+  "properties": {
+    "reversibility_max_abs": 4.440892098500626e-16,
+    "pressure_nonnegative": true,
+    "anchor_error_percent": 1.1102230246251565e-14,
+    "synthetic_profiles": 1100
+  }
+}

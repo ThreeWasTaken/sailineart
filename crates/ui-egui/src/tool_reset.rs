@@ -164,7 +164,7 @@ pub fn reset_options(o: &mut ToolOptions, tool: Tool) {
         Tool::Sponge => reset!(sponge_mode, vibrance),
         Tool::Pen => reset!(vector_mode, pen_auto_add_delete),
         Tool::CurvaturePen => reset!(vector_mode),
-        Tool::SaiLine | Tool::SaiLineWidth => reset!(sailine_width),
+        Tool::SaiCurve | Tool::SaiPressure => reset!(sailine_width),
         Tool::FreeformPen => reset!(vector_mode, curve_fit),
         Tool::Rectangle | Tool::EllipseShape | Tool::Triangle | Tool::Polygon | Tool::Line | Tool::CustomShape => {
             reset!(vector_mode, shape_fill, stroke_width, shape_stroke, corner_radius, polygon_sides, line_weight)

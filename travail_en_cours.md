@@ -11,8 +11,8 @@ robustesse du rendu lorsque plusieurs tracés vivent sur le même calque.
 
 ## Fonctionnalités terminées
 
-- Outil SaiLine distinct dans la barre d’outils, avec icône dédiée et options natives.
-- Création par clics successifs, aperçu interpolé et validation par Entrée, Done ou clic droit.
+- Outil SaiCurve distinct dans la barre d’outils, avec icône dédiée et options natives.
+- Création par clics successifs, aperçu interpolé avec extrémités rondes pendant le tracé, puis validation par Entrée, Done ou clic droit.
 - Annulation du brouillon par Échap, Cancel, changement d’outil ou changement de document.
 - Retour arrière, Ctrl+Z et Ctrl+Y pendant la création du brouillon.
 - Calque `LineworkLayer` persistant, plusieurs tracés indépendants par calque et identifiants stables.
@@ -32,12 +32,11 @@ robustesse du rendu lorsque plusieurs tracés vivent sur le même calque.
 - Insertion sur un segment avec Ctrl-glisser et suppression avec Alt-clic.
 - Historique coalescé : un glissement complet correspond à une seule étape undo/redo.
 - Commande atomique `linework.movePoints` pour déplacer de nombreuses ancres en une transaction.
-- Largeur variable par point (`width_factor`), commande `linework.setPointWidth` et contrôle Point width.
-- Outil SaiLine Width séparé, avec icône dédiée affichée à côté du pointeur classique.
-- Glissement horizontal SaiLine Width prévisualisé en direct, avec sensibilité fine et validation coalescée au relâchement.
-- Clic simple SaiLine Width pour appliquer immédiatement la largeur affichée aux points successifs et harmoniser un tracé.
-- Après un glissement, la valeur Width de la barre supérieure est synchronisée avec l’épaisseur obtenue.
-- Clic droit SaiLine Width pour désélectionner le point ou les points actifs.
+- Largeur de base indépendante (0,7–30 px) et pression propre à chaque point (`width_factor`, 100 % par défaut).
+- Outil séparé **SaiPressure**, avec compatibilité de lecture pour l'ancien nom `SaiLineWidth`.
+- SaiCurve et SaiPressure partagent Ctrl-clic pour insérer un point et Ctrl-glisser pour déplacer un ou plusieurs points.
+- Dans SaiPressure, le clic simple ne modifie pas la pression ; le glisser horizontal ajuste de 0 à 200 %, actualise l’aperçu à 30 Hz maximum pour limiter les recalculs et enregistre la dernière valeur en une étape d’historique au relâchement.
+- Clic droit dans SaiPressure désélectionne le point ou les points actifs.
 - Couleur par tracé, commande `linework.setPathColor` et action Path color ← foreground.
 - Ajout de nouveaux tracés au calque Linework actif au lieu de créer systématiquement un calque.
 - Recomposition du cache avec tous les tracés après déplacement, insertion, suppression, largeur ou couleur.
@@ -45,11 +44,17 @@ robustesse du rendu lorsque plusieurs tracés vivent sur le même calque.
 
 ## Travail en cours
 
-Le rendu de largeur variable est en cours d’affinage. L’objectif est une enveloppe offset continue
-autour de la courbe centrale, avec un rayon interpolé entre les points. Plusieurs versions ont été
-testées : contour polygonal, union de disques puis enveloppe offset échantillonnée. La version
-actuelle utilise une enveloppe offset dérivée d’échantillons de la courbe et des jonctions
-circulaires pour les facteurs supérieurs à 1.
+La géométrie par défaut est désormais le modèle **SAI simplifié** validé (α=1/3, β=1/2,
+tension −0,2, tangentes nulles aux extrémités), appelé directement depuis le banc expérimental.
+Le modèle optimisé reste disponible dans les expériences ; le sélecteur de modèles a été retiré
+de l'interface finale.
+
+La recherche de SaiPressure est conservée dans `experiments/sailine_width/`. Les six cas de la
+capture sont extraits, les largeurs sont mesurées selon les normales de la courbe, et la planche
+de diagnostic ainsi que le classement sont reproductibles. L'interpolation linéaire par longueur
+d'arc obtient 1,302 px d'erreur moyenne équilibrée contre 1,373 px pour le paramètre Bézier ;
+0,071 px est inférieur à l'incertitude estimée (±1,5 px), donc ce résultat ne départage pas ces
+deux lois. Le rendu de contour n'est pas encore confirmé comme équivalent pixel à pixel à Sai.
 
 Le déplacement collectif est maintenant atomique côté moteur. Une légère latence visuelle peut
 encore apparaître pendant un glissement rapide, car le cache complet de tous les tracés du calque
@@ -64,9 +69,12 @@ est reconstruit à chaque mouvement. Aucun doublon de tracé ne doit être affic
 - Les facteurs de largeur extrêmes doivent rester stables : éviter auto-intersections, pointes,
   poches noires ou discontinuités entre sections.
 - Les points superposés doivent conserver le comportement d’angle dur validé précédemment.
-- L’interpolation doit encore être comparée visuellement à SAI sur plusieurs tracés réels ; le
-  quadrillage fourni a servi à ajuster les grands arcs et les retours courts. Sur la comparaison
-  violette du 17 octobre, le grand arc inférieur rejoint largement l'épaisseur du trait SAI ;
+- La géométrie SAI simplifiée est maintenant le modèle par défaut. L'interpolation de pression
+  linéaire en paramètre Bézier reste provisoire : la longueur d'arc score légèrement mieux mais
+  l'écart est sous l'incertitude des mesures. Refaire une comparaison interactive avant de choisir.
+- Le rendu du contour à pression variable doit encore être évalué en courbes serrées et zones de
+  recouvrement. Les six captures et leurs zones mesurées sont documentées dans le banc.
+- Sur la comparaison violette du 17 octobre, le grand arc inférieur rejoint largement l'épaisseur du trait SAI ;
   la verticale gauche reste décalée d'environ 4 à 6 pixels au milieu. Éviter de régler ce seul
   exemple au détriment des autres courbes. Une seconde référence quadrillée montre un écart sur
   la montée depuis le premier point (bleu à droite du centre rouge) et sur le long segment final
@@ -85,8 +93,8 @@ est reconstruit à chaque mouvement. Aucun doublon de tracé ne doit être affic
   et 3. Les tangentes libres prolongent maintenant légèrement le virage quand les segments sont
   de longueurs comparables, avec extinction progressive pour les cas courts, très déséquilibrés
   ou presque inversés. Vérifier visuellement les trois formes après recompilation.
-- La pression réelle du stylet n’est pas encore reliée à `width_factor` ; la largeur est éditée
-  manuellement.
+- La pression physique du stylet n’est pas reliée à `width_factor` ; SaiPressure édite la valeur
+  du point par glissement horizontal.
 - La courbure globale réglable, la transformation Ctrl+T de points, le copier/coller, la scission,
   le raccordement et le déplacement d’un tracé entier restent à implémenter.
 - Aucun framework de plug-ins n’est à créer par anticipation.
@@ -111,3 +119,33 @@ Avec `CARGO_HOME=/mnt/SSD2/Codex/.tooling/cargo` :
 - `linework.deletePoint`
 - `linework.setPointWidth`
 - `linework.setPathColor`
+
+## Mise à jour — SaiPressure et interpolation par défaut
+
+Le moteur de production utilise maintenant SaiSimplified par défaut sans modifier les points
+historiques. L'ancien état outil `SaiLineWidth` est encore chargé par alias, tandis que l'interface
+et les nouveaux états nomment le second outil SaiPressure. Les deux outils partagent Ctrl-clic et
+Ctrl-glisser. SaiPressure ne change plus la pression au clic ; un glisser horizontal affiche et
+valide 0–200 % au relâchement. Le déplacement et la pression gardent leur propre geste et une
+transaction undo par glisser.
+
+Le banc `experiments/sailine_width` contient `dataset.json`, la capture source, `diagnostic.png`,
+`comparison_board.png`, `results.json`, le code Rust et les scripts Python. Les six cas ont été
+scorés. La loi linéaire en longueur d'arc mène à 1,302 px, contre 1,373 px pour le paramètre Bézier ;
+la différence est plus faible que la marge de mesure, donc l'interpolation de pression actuelle
+reste à valider visuellement. L'extraction marque zéro mesure ambiguë, mais les recouvrements et
+l'antialiasing demeurent une limite. Les tests géométriques, moteur et UI passent respectivement
+76/77 (un test ignoré), 9/9 et 11/11 ; la compilation complète PhotoCraft passe.
+
+
+## Retours récents — SaiCurve et performances SaiPressure
+
+L'ancien nom d'outil SaiLine a été remplacé par SaiCurve dans l'interface et l'état Rust ; le
+chargement accepte encore `SaiLine` pour les états sauvegardés. Pendant la création, le trait
+prévisualisé reçoit maintenant des caps circulaires aux deux extrémités, comme le tracé validé.
+
+Le changement de pression conserve la dernière valeur du curseur à chaque événement, mais ne
+reconstruit plus le cache à chaque mouvement : l'aperçu moteur est plafonné à environ 30 images
+par seconde, et la valeur exacte du relâchement est toujours calculée puis enregistrée. Le test UI
+vérifie que les mises à jour rapides sont sautées et que le relâchement valide bien la dernière
+valeur.

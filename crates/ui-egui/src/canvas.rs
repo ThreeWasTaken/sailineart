@@ -3353,11 +3353,11 @@ pub fn canvas_view(app: &mut PhotocraftApp, ui: &mut egui::Ui, idx: usize, rect:
         {
             crate::canvas_tool_menu::open_transform(app, &ctx, [p.x, p.y]);
         }
-        // SaiLine follows the same finish gesture as Enter: a secondary click commits the draft
+        // SaiCurve follows the same finish gesture as Enter: a secondary click commits the draft
         // instead of opening a contextual menu.
-        let sailine_finished = response.secondary_clicked() && tool == Tool::SaiLine;
-        if response.secondary_clicked() && tool == Tool::SaiLineWidth {
-            app.ui.sailine_width_drag = None;
+        let sailine_finished = response.secondary_clicked() && tool == Tool::SaiCurve;
+        if response.secondary_clicked() && tool == Tool::SaiPressure {
+            app.ui.sailine_pressure_drag = None;
             app.ui.sailine_selection = None;
             app.ui.sailine_selections.clear();
         }
@@ -3895,15 +3895,15 @@ pub fn canvas_view(app: &mut PhotocraftApp, ui: &mut egui::Ui, idx: usize, rect:
                 Tool::Pen
                 | Tool::FreeformPen
                 | Tool::CurvaturePen
-                | Tool::SaiLine
-                | Tool::SaiLineWidth
+                | Tool::SaiCurve
+                | Tool::SaiPressure
                 | Tool::AddAnchorPoint
                 | Tool::DeleteAnchorPoint
                 | Tool::ConvertPoint => {
                     if precise_other_cursor(app) {
                         egui::CursorIcon::Crosshair
                     } else {
-                        if matches!(tool, Tool::SaiLine | Tool::SaiLineWidth) {
+                        if matches!(tool, Tool::SaiCurve | Tool::SaiPressure) {
                             crate::icons::cursor_tool_badge(ui.ctx(), crate::icons::tool_icon(tool), p);
                             egui::CursorIcon::Default
                         } else {
@@ -4765,7 +4765,7 @@ pub(crate) fn pen_cursor(ctx: &egui::Context, tool: Tool, p: Pos2) -> egui::Curs
     // Where each icon's point is in its 24-unit box: the full-size pen's nib at (2.3, 2.3); the
     // Freeform and Curvature pens draw it at 0.68 × from (7, 7); Convert Point's apex anchor.
     let hot = match tool {
-        Tool::FreeformPen | Tool::CurvaturePen | Tool::SaiLine => vec2(8.56, 8.56),
+        Tool::FreeformPen | Tool::CurvaturePen | Tool::SaiCurve => vec2(8.56, 8.56),
         Tool::ConvertPoint => vec2(12.0, 7.0),
         _ => vec2(2.3, 2.3),
     };
@@ -5164,7 +5164,7 @@ pub fn tool_event(app: &mut PhotocraftApp, ev: ToolEvent, mods: egui::Modifiers)
                     }
                     return;
                 }
-                Tool::SaiLine => {
+                Tool::SaiCurve => {
                     if mods.ctrl {
                         crate::sailine_ui::begin_drag(app, [x, y]);
                     } else if mods.shift && crate::sailine_ui::begin_selection_box(app, [x, y]) {
@@ -5174,8 +5174,16 @@ pub fn tool_event(app: &mut PhotocraftApp, ev: ToolEvent, mods: egui::Modifiers)
                     }
                     return;
                 }
-                Tool::SaiLineWidth => {
-                    crate::sailine_ui::begin_width_drag(app, [x, y]);
+                Tool::SaiPressure => {
+                    if mods.ctrl {
+                        crate::sailine_ui::begin_drag(app, [x, y]);
+                    } else if mods.shift && crate::sailine_ui::begin_selection_box(app, [x, y]) {
+                        return;
+                    } else if mods.shift || mods.alt {
+                        crate::sailine_ui::down_with_mods(app, [x, y], mods);
+                    } else {
+                        crate::sailine_ui::begin_pressure_drag(app, [x, y]);
+                    }
                     return;
                 }
                 Tool::CurvaturePen => {
@@ -5254,13 +5262,13 @@ pub fn tool_event(app: &mut PhotocraftApp, ev: ToolEvent, mods: egui::Modifiers)
             app.live_stroke = if strokes_live(tool) { begin_live_stroke(app) } else { None };
         }
         ToolEvent::Move { x, y, pressure } => {
-            if tool == Tool::SaiLineWidth && crate::sailine_ui::width_drag_to(app, [x, y]) {
+            if matches!(tool, Tool::SaiCurve | Tool::SaiPressure) && crate::sailine_ui::drag_to(app, [x, y]) {
                 return;
             }
-            if tool == Tool::SaiLine && crate::sailine_ui::drag_to(app, [x, y]) {
+            if tool == Tool::SaiPressure && crate::sailine_ui::pressure_drag_to(app, [x, y]) {
                 return;
             }
-            if tool == Tool::SaiLine && crate::sailine_ui::selection_box_to(app, [x, y]) {
+            if tool == Tool::SaiCurve && crate::sailine_ui::selection_box_to(app, [x, y]) {
                 return;
             }
             // Polygonal Lasso: ⌥ held while the button is down draws freehand into the polygon;
@@ -5275,16 +5283,16 @@ pub fn tool_event(app: &mut PhotocraftApp, ev: ToolEvent, mods: egui::Modifiers)
             feed_live_stroke(app);
         }
         ToolEvent::Up { x, y } => {
-            if tool == Tool::SaiLineWidth && app.ui.sailine_width_drag.is_some() {
-                crate::sailine_ui::end_width_drag(app, [x, y]);
+            if tool == Tool::SaiPressure && app.ui.sailine_pressure_drag.is_some() {
+                crate::sailine_ui::end_pressure_drag(app, [x, y]);
                 return;
             }
-            if tool == Tool::SaiLine && app.ui.sailine_point_drag.is_some() {
+            if matches!(tool, Tool::SaiCurve | Tool::SaiPressure) && app.ui.sailine_point_drag.is_some() {
                 crate::sailine_ui::drag_to(app, [x, y]);
                 crate::sailine_ui::end_drag(app);
                 return;
             }
-            if tool == Tool::SaiLine && crate::sailine_ui::end_selection_box(app, [x, y]) {
+            if tool == Tool::SaiCurve && crate::sailine_ui::end_selection_box(app, [x, y]) {
                 return;
             }
             if tool.is_type()

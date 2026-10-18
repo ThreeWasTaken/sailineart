@@ -132,6 +132,34 @@ fn linework_point_width_is_persisted_and_rerenders_the_outline() {
 }
 
 #[test]
+fn pressure_range_insert_undo_redo_and_serialization_preserve_point_values() {
+    let mut s = Session::new();
+    s.execute("file.new", json!({"width": 96, "height": 64})).unwrap();
+    let result = s.execute("linework.create", json!({"points": [[8, 24], [88, 24]], "width": 8, "widthFactors": [0.0, 2.0]})).unwrap();
+    let layer = photocraft_doc::LayerId(result["layer"].as_u64().unwrap());
+    let path = match &s.active().unwrap().doc.layer(layer).unwrap().content {
+        LayerContent::Linework(linework) => linework.paths[0].id,
+        _ => panic!("linework layer expected"),
+    };
+    let inserted = s.execute("linework.insertPoint", json!({"layer": layer.0, "path": path, "index": 1, "x": 40, "y": 24, "factor": 1.25})).unwrap();
+    let inserted_id = inserted["point"].as_u64().unwrap();
+    let values = |s: &Session| match &s.active().unwrap().doc.layer(layer).unwrap().content {
+        LayerContent::Linework(linework) => linework.paths[0].points.iter().map(|point| (point.id, point.width_factor)).collect::<Vec<_>>(),
+        _ => Vec::new(),
+    };
+    assert_eq!(values(&s).iter().map(|(_, factor)| *factor).collect::<Vec<_>>(), vec![0.0, 1.25, 2.0]);
+    assert!(s.undo());
+    assert_eq!(values(&s).iter().map(|(_, factor)| *factor).collect::<Vec<_>>(), vec![0.0, 2.0]);
+    assert!(s.redo());
+    assert!(values(&s).iter().any(|(id, factor)| *id == inserted_id && *factor == 1.25));
+    let bytes = save_to_bytes(&s.active().unwrap().doc, &SaveOptions::default()).unwrap();
+    let loaded = load_from_bytes(&bytes).unwrap();
+    let LayerContent::Linework(loaded_linework) = &loaded.layer(layer).unwrap().content else { panic!("linework layer expected") };
+    assert_eq!(loaded_linework.paths[0].points.iter().map(|point| point.width_factor).collect::<Vec<_>>(), vec![0.0, 1.25, 2.0]);
+    assert!(s.execute("linework.insertPoint", json!({"layer": layer.0, "path": path, "index": 1, "x": 32, "y": 24, "factor": 2.01})).is_err());
+}
+
+#[test]
 fn interpolation_preview_switches_geometry_without_history_or_document_changes() {
     let mut s = Session::new();
     s.execute("file.new", json!({"width": 96, "height": 96})).unwrap();

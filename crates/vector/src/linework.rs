@@ -9,12 +9,12 @@ use photocraft_geom::Point;
 
 const MAX_POINTS: usize = 4096;
 
-/// Temporary interpolation choices for evaluating SaiLine geometry. `Legacy` is the
-/// production interpolator that predates the SAI research experiment.
+/// Interpolation choices retained for research and regression tests. SaiSimplified is the
+/// production model; Legacy remains available as a comparison baseline.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum InterpolationModel {
-    #[default]
     Legacy,
+    #[default]
     SaiSimplified,
     SaiOptimized,
 }
@@ -69,7 +69,7 @@ pub fn interpolate_points(points: &[[f64; 2]]) -> Result<Path, String> {
 /// Interpolate with an optional live handle at the last anchor. SaiLine uses the handle's
 /// direction for the incoming tangent and its distance as the rounding amount.
 pub fn interpolate_points_with_handle(points: &[[f64; 2]], handle: Option<[f64; 2]>) -> Result<Path, String> {
-    interpolate_points_with_model(points, handle, InterpolationModel::Legacy)
+    interpolate_points_with_model(points, handle, InterpolationModel::SaiSimplified)
 }
 
 /// Interpolate with one of the experimental SAI parameter sets, or the unchanged Legacy model.
@@ -318,7 +318,7 @@ fn interpolate_sai(points: &[[f64; 2]], model: InterpolationModel) -> Result<Pat
 
 /// Build a filled outline with linearly interpolated width factors at the logical anchors.
 pub fn variable_width_shape(points: &[[f64; 2]], factors: &[f32], width: f64, color: Color, handle: Option<[f64; 2]>) -> Result<ShapeLayer, String> {
-    variable_width_shape_with_model(points, factors, width, color, handle, InterpolationModel::Legacy)
+    variable_width_shape_with_model(points, factors, width, color, handle, InterpolationModel::SaiSimplified)
 }
 
 /// Build the variable-width outline using the requested centerline interpolation model.
@@ -373,7 +373,25 @@ pub fn variable_width_shape_with_model(
     right.reverse();
     left.extend(right);
     let mut subpaths = vec![Subpath::polygon(&left).with_op(PathOp::Combine)];
+    // Round open endpoints with their actual effective radius. The sampled side outline closes
+    // with a diameter; these unions turn that butt closure into the round cap SAI shows.
+    for index in [0, points.len().saturating_sub(1)] {
+        let radius = width * f64::from(factors[index].max(0.0)) * 0.5;
+        if radius <= 0.0 {
+            continue;
+        }
+        let circle: Vec<(f64, f64)> = (0..48)
+            .map(|step| {
+                let angle = std::f64::consts::TAU * step as f64 / 48.0;
+                (points[index][0] + angle.cos() * radius, points[index][1] + angle.sin() * radius)
+            })
+            .collect();
+        subpaths.push(Subpath::polygon(&circle).with_op(PathOp::Combine));
+    }
     for (index, point) in points.iter().enumerate() {
+        if index == 0 || index + 1 == points.len() {
+            continue;
+        }
         let radius = width * f64::from((factors[index] - 1.0).max(0.0)) * 0.5;
         if radius <= 0.0 {
             continue;
@@ -402,8 +420,8 @@ mod tests {
     }
 
     fn sampled_path_distance(a: &[[f64; 2]], b: &[[f64; 2]]) -> f64 {
-        let a = interpolate_points(a).unwrap();
-        let b = interpolate_points(b).unwrap();
+        let a = interpolate_points_with_model(a, None, InterpolationModel::Legacy).unwrap();
+        let b = interpolate_points_with_model(b, None, InterpolationModel::Legacy).unwrap();
         let a_segments = a.subpaths[0].segments();
         let b_segments = b.subpaths[0].segments();
         assert_eq!(a_segments.len(), b_segments.len());
@@ -445,7 +463,7 @@ mod tests {
 
     #[test]
     fn two_points_produce_a_straight_cubic() {
-        let path = interpolate_points(&[[0.0, 0.0], [12.0, 6.0]]).unwrap();
+        let path = interpolate_points_with_model(&[[0.0, 0.0], [12.0, 6.0]], None, InterpolationModel::Legacy).unwrap();
         let segment = path.subpaths[0].segments()[0];
         assert_eq!(segment[1], Point::new(4.0, 2.0));
         assert_eq!(segment[2], Point::new(8.0, 4.0));
@@ -473,7 +491,7 @@ mod tests {
         // Geometry from a grid comparison with SAI: the long lower sweep should bow below its
         // anchors, while its following short turn must not produce a large loop to the right.
         let points = [[214.0, 142.0], [251.0, 604.0], [1142.0, 498.0], [1036.0, 139.0]];
-        let path = interpolate_points(&points).unwrap();
+        let path = interpolate_points_with_model(&points, None, InterpolationModel::Legacy).unwrap();
         let knots = &path.subpaths[0].knots;
         let lower = &knots[1];
         let right = &knots[2];
@@ -491,7 +509,7 @@ mod tests {
         // A thin SAI comparison exposes the previous endpoint rule: after a horizontal span,
         // it made this longer final diagonal dip well below SAI at its midpoint.
         let points = [[1117.0, 483.0], [573.0, 483.0], [1115.0, 750.0]];
-        let path = interpolate_points(&points).unwrap();
+        let path = interpolate_points_with_model(&points, None, InterpolationModel::Legacy).unwrap();
         let knots = &path.subpaths[0].knots;
         let start = &knots[1];
         let end = &knots[2];
@@ -502,7 +520,7 @@ mod tests {
     #[test]
     fn nearly_equal_neighbor_lengths_change_the_previous_arc_continuously() {
         fn previous_midpoint_y(last_y: f64) -> f64 {
-            let path = interpolate_points(&[[0.0, 0.0], [320.0, 0.0], [320.0, last_y]]).unwrap();
+            let path = interpolate_points_with_model(&[[0.0, 0.0], [320.0, 0.0], [320.0, last_y]], None, InterpolationModel::Legacy).unwrap();
             let knots = &path.subpaths[0].knots;
             (knots[0].anchor.y + 3.0 * knots[0].out_ctrl.y + 3.0 * knots[1].in_ctrl.y + knots[1].anchor.y) / 8.0
         }
@@ -525,12 +543,12 @@ mod tests {
 
     #[test]
     fn three_point_l_arcs_bend_outward_at_both_free_ends() {
-        let equal = interpolate_points(&[[469.0, 172.0], [776.0, 172.0], [772.0, 479.0]]).unwrap();
+        let equal = interpolate_points_with_model(&[[469.0, 172.0], [776.0, 172.0], [772.0, 479.0]], None, InterpolationModel::Legacy).unwrap();
         let knots = &equal.subpaths[0].knots;
         assert!(knots[0].out_ctrl.y < knots[0].anchor.y - 15.0, "the start should rise into the outer arc");
         assert!(knots[2].in_ctrl.x > knots[2].anchor.x + 15.0, "the end should arrive from the outside");
 
-        let shorter_return = interpolate_points(&[[9.0, 172.0], [355.0, 172.0], [355.0, 440.0]]).unwrap();
+        let shorter_return = interpolate_points_with_model(&[[9.0, 172.0], [355.0, 172.0], [355.0, 440.0]], None, InterpolationModel::Legacy).unwrap();
         let start = &shorter_return.subpaths[0].knots[0];
         assert!(start.out_ctrl.y > start.anchor.y - 3.0, "the shorter return should retain its established start");
     }
@@ -575,14 +593,14 @@ mod tests {
 
     #[test]
     fn live_handle_changes_the_last_tangent_and_rounding() {
-        let straight = interpolate_points(&[[0.0, 0.0], [20.0, 20.0], [40.0, 0.0]]).unwrap();
+        let straight = interpolate_points_with_model(&[[0.0, 0.0], [20.0, 20.0], [40.0, 0.0]], None, InterpolationModel::Legacy).unwrap();
         let rounded = interpolate_points_with_handle(&[[0.0, 0.0], [20.0, 20.0], [40.0, 0.0]], Some([60.0, 20.0])).unwrap();
         assert_ne!(straight.subpaths[0].knots[2].in_ctrl, rounded.subpaths[0].knots[2].in_ctrl);
     }
 
     #[test]
     fn two_point_handle_controls_the_whole_arc() {
-        let path = interpolate_points_with_handle(&[[0.0, 0.0], [40.0, 0.0]], Some([20.0, 30.0])).unwrap();
+        let path = interpolate_points_with_model(&[[0.0, 0.0], [40.0, 0.0]], Some([20.0, 30.0]), InterpolationModel::Legacy).unwrap();
         let first = path.subpaths[0].knots[0].out_ctrl;
         let second = path.subpaths[0].knots[1].in_ctrl;
         assert!((first.x - 40.0 / 3.0).abs() < 1e-9 && (first.y - 20.0).abs() < 1e-9);
@@ -597,9 +615,13 @@ mod tests {
     }
 
     #[test]
-    fn legacy_model_is_bit_for_bit_the_existing_entry_point() {
+    fn default_model_is_sai_simplified_and_legacy_remains_selectable() {
         let points = [[0.0, 0.0], [120.0, -30.0], [170.0, 90.0], [400.0, 40.0]];
-        assert_eq!(interpolate_points_with_handle(&points, None).unwrap(), interpolate_points_with_model(&points, None, InterpolationModel::Legacy).unwrap());
+        assert_eq!(
+            interpolate_points_with_handle(&points, None).unwrap(),
+            interpolate_points_with_model(&points, None, InterpolationModel::SaiSimplified).unwrap()
+        );
+        assert!(interpolate_points_with_model(&points, None, InterpolationModel::Legacy).is_ok());
     }
 
     #[test]
@@ -684,5 +706,26 @@ mod tests {
                 previous_x = point[0];
             }
         }
+    }
+
+    #[test]
+    fn zero_pressure_keeps_the_anchor_and_nonzero_open_endpoint_gets_a_round_cap() {
+        let shape = variable_width_shape_with_model(
+            &[[10.0, 20.0], [90.0, 20.0]],
+            &[0.0, 2.0],
+            8.0,
+            Color::rgba(0.0, 0.0, 0.0, 1.0),
+            None,
+            InterpolationModel::SaiSimplified,
+        )
+        .unwrap();
+        let subpath = shape.path.subpaths.first().unwrap();
+        assert!(subpath.knots.len() > 4, "outline should have sampled coverage geometry");
+        assert_eq!(shape.path.subpaths.len(), 2, "the nonzero endpoint receives exactly one round cap");
+        assert_eq!(subpath.knots[0].anchor, Point::new(10.0, 20.0));
+        let cap = shape.path.subpaths.get(1).unwrap();
+        let xs: Vec<_> = cap.knots.iter().map(|knot| knot.anchor.x).collect();
+        assert!((xs.iter().copied().fold(f64::NEG_INFINITY, f64::max) - 98.0).abs() < 0.1);
+        assert!((xs.iter().copied().fold(f64::INFINITY, f64::min) - 82.0).abs() < 0.1);
     }
 }

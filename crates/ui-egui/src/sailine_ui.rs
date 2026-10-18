@@ -1,20 +1,19 @@
-//! SaiLine click-to-create tool. Drafts never mutate the document; commit uses the engine.
+//! SaiCurve click-to-create tool. Drafts never mutate the document; commit uses the engine.
 use egui::{Key, Modifiers, Stroke};
 use photocraft_doc::{DocId, LayerId};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::{
+    sync::atomic::{AtomicU64, Ordering},
+    time::{Duration, Instant},
+};
 
 use crate::{PhotocraftApp, canvas::ViewXform, state::Tool, theme::Tokens};
 
 static NEXT_DRAG: AtomicU64 = AtomicU64::new(1);
 
-fn interpolation_id(app: &PhotocraftApp) -> &'static str {
-    match app.ui.tool_options.sailine_interpolation.as_str() {
-        "saiSimplified" => "saiSimplified",
-        "saiOptimized" => "saiOptimized",
-        _ => "legacy",
-    }
+const fn interpolation_id() -> &'static str {
+    "saiSimplified"
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -42,12 +41,14 @@ pub struct PointDrag {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct PointWidthDrag {
+pub struct PointPressureDrag {
     pub selection: Selection,
     pub start_x: f64,
     pub start_factor: f32,
     pub current_factor: f32,
     pub moved: bool,
+    #[serde(skip)]
+    last_preview_at: Option<Instant>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
@@ -58,16 +59,16 @@ pub struct SelectionBox {
 
 /// Leaving the tool or its document discards the uncommitted draft.
 pub fn sync(app: &mut PhotocraftApp) {
-    if app.ui.sailine.as_ref().is_some_and(|draft| app.ui.tool != Tool::SaiLine || app.session.active().is_none_or(|s| s.doc.id != draft.document)) {
+    if app.ui.sailine.as_ref().is_some_and(|draft| app.ui.tool != Tool::SaiCurve || app.session.active().is_none_or(|s| s.doc.id != draft.document)) {
         app.ui.sailine = None;
     }
     if app.ui.sailine_selection.as_ref().is_some_and(|selection| {
-        !matches!(app.ui.tool, Tool::SaiLine | Tool::SaiLineWidth) || app.session.active().is_none_or(|s| s.doc.id != selection.document)
+        !matches!(app.ui.tool, Tool::SaiCurve | Tool::SaiPressure) || app.session.active().is_none_or(|s| s.doc.id != selection.document)
     }) {
         app.ui.sailine_selection = None;
         app.ui.sailine_selections.clear();
         app.ui.sailine_point_drag = None;
-        app.ui.sailine_width_drag = None;
+        app.ui.sailine_pressure_drag = None;
         app.ui.sailine_selection_box = None;
     }
 }
@@ -87,7 +88,7 @@ pub fn down_with_mods(app: &mut PhotocraftApp, point: [f64; 2], mods: Modifiers)
         && let Some((layer, path, point_id)) = nearest_point(app, point)
     {
         if mods.alt {
-            let model = interpolation_id(app);
+            let model = interpolation_id();
             let _ = app.run("linework.deletePoint", json!({"layer": layer.0, "path": path, "point": point_id, "interpolation": model}));
             return;
         }
@@ -113,18 +114,20 @@ pub fn down_with_mods(app: &mut PhotocraftApp, point: [f64; 2], mods: Modifiers)
 }
 
 pub fn begin_drag(app: &mut PhotocraftApp, point: [f64; 2]) -> bool {
-    if app.ui.tool != Tool::SaiLine || app.ui.sailine.is_some() {
+    if !matches!(app.ui.tool, Tool::SaiCurve | Tool::SaiPressure) || app.ui.sailine.is_some() {
         return false;
     }
     let Some(document) = app.session.active().map(|s| s.doc.id) else { return false };
     let (layer, path, point_id) = if let Some(found) = nearest_point(app, point) {
         found
     } else {
-        let Some((layer, path, index, position)) = nearest_segment(app, point) else { return false };
-        let model = interpolation_id(app);
-        let Ok(result) = app
-            .run("linework.insertPoint", json!({"layer": layer.0, "path": path, "index": index, "x": position[0], "y": position[1], "interpolation": model}))
-        else {
+        let Some((layer, path, index, position, t)) = nearest_segment(app, point) else { return false };
+        let model = interpolation_id();
+        let factor = segment_width_factor(app, layer, path, index, t);
+        let Ok(result) = app.run(
+            "linework.insertPoint",
+            json!({"layer": layer.0, "path": path, "index": index, "x": position[0], "y": position[1], "factor": factor, "interpolation": model}),
+        ) else {
             return false;
         };
         let Some(point_id) = result["point"].as_u64() else { return false };
@@ -151,7 +154,7 @@ pub fn drag_to(app: &mut PhotocraftApp, point: [f64; 2]) -> bool {
         .zip(drag.origins.iter())
         .map(|(selection, origin)| json!({"layer": selection.layer.0, "path": selection.path, "point": selection.point, "x": origin[0] + dx, "y": origin[1] + dy}))
         .collect();
-    let model = interpolation_id(app);
+    let model = interpolation_id();
     let _ = app.run("linework.movePoints", json!({"points": points, "coalesce": format!("sailine-move:{}", drag.key), "interpolation": model}));
     true
 }
@@ -161,7 +164,7 @@ pub fn end_drag(app: &mut PhotocraftApp) {
 }
 
 pub fn begin_selection_box(app: &mut PhotocraftApp, point: [f64; 2]) -> bool {
-    if app.ui.tool != Tool::SaiLine || app.ui.sailine.is_some() || nearest_point(app, point).is_some() {
+    if !matches!(app.ui.tool, Tool::SaiCurve | Tool::SaiPressure) || app.ui.sailine.is_some() || nearest_point(app, point).is_some() {
         return false;
     }
     let Some(state) = app.session.active() else { return false };
@@ -237,97 +240,111 @@ fn point_width(app: &PhotocraftApp, selection: Selection) -> Option<f32> {
     linework.paths.iter().find(|path| path.id == selection.path)?.points.iter().find(|point| point.id == selection.point).map(|point| point.width_factor)
 }
 
-fn path_width(app: &PhotocraftApp, selection: Selection) -> Option<f32> {
-    let state = app.session.active()?;
-    let layer = state.doc.layer(selection.layer)?;
-    let photocraft_doc::LayerContent::Linework(linework) = &layer.content else { return None };
-    linework.paths.iter().find(|path| path.id == selection.path).map(|path| path.width)
+fn segment_width_factor(app: &PhotocraftApp, layer_id: LayerId, path_id: u64, end_index: usize, t: f64) -> f32 {
+    let Some(path) = app.session.active().and_then(|state| state.doc.layer(layer_id)).and_then(|layer| match &layer.content {
+        photocraft_doc::LayerContent::Linework(linework) => linework.paths.iter().find(|path| path.id == path_id),
+        _ => None,
+    }) else {
+        return 1.0;
+    };
+    let (Some(a), Some(b)) = (end_index.checked_sub(1).and_then(|i| path.points.get(i)), path.points.get(end_index)) else {
+        return 1.0;
+    };
+    let t = t.clamp(0.0, 1.0);
+    (f64::from(a.width_factor) * (1.0 - t) + f64::from(b.width_factor) * t).clamp(0.0, 2.0) as f32
 }
 
-pub fn begin_width_drag(app: &mut PhotocraftApp, point: [f64; 2]) -> bool {
-    if app.ui.tool != Tool::SaiLineWidth {
+pub fn begin_pressure_drag(app: &mut PhotocraftApp, point: [f64; 2]) -> bool {
+    if app.ui.tool != Tool::SaiPressure {
         return false;
     }
     let Some(document) = app.session.active().map(|s| s.doc.id) else { return false };
     let Some((layer, path, point_id)) = nearest_point(app, point) else { return false };
     let selection = Selection { document, layer, path, point: point_id };
-    let factor = point_width(app, selection).unwrap_or(1.0);
+    let factor = point_width(app, selection).unwrap_or(1.0).clamp(0.0, 2.0);
     app.ui.sailine_selection = Some(selection);
     app.ui.sailine_selections = vec![selection];
-    app.ui.sailine_width_drag = Some(PointWidthDrag { selection, start_x: point[0], start_factor: factor, current_factor: factor, moved: false });
+    app.ui.sailine_pressure_drag =
+        Some(PointPressureDrag { selection, start_x: point[0], start_factor: factor, current_factor: factor, moved: false, last_preview_at: None });
     true
 }
 
-pub fn width_drag_to(app: &mut PhotocraftApp, point: [f64; 2]) -> bool {
-    let (selection, factor) = {
-        let Some(drag) = app.ui.sailine_width_drag.as_mut() else { return false };
+pub fn pressure_drag_to(app: &mut PhotocraftApp, point: [f64; 2]) -> bool {
+    let (selection, factor, moved, should_render) = {
+        let Some(drag) = app.ui.sailine_pressure_drag.as_mut() else { return false };
         let dx = point[0] - drag.start_x;
         drag.moved |= dx.abs() > 0.01;
-        drag.current_factor = (drag.start_factor + (dx / 120.0) as f32).clamp(0.0, 1000.0);
-        (drag.selection, drag.current_factor)
+        drag.current_factor = (drag.start_factor + (dx / 120.0) as f32).clamp(0.0, 2.0);
+        let now = Instant::now();
+        let should_render = drag.last_preview_at.is_none_or(|last| now.duration_since(last) >= Duration::from_millis(33));
+        if should_render {
+            drag.last_preview_at = Some(now);
+        }
+        (drag.selection, drag.current_factor, drag.moved, should_render)
     };
-    let model = interpolation_id(app);
+    if !moved || !should_render {
+        return true;
+    }
+    let model = interpolation_id();
     let _ = app.run(
         "linework.setPointWidth",
-        json!({"layer": selection.layer.0, "path": selection.path, "point": selection.point, "factor": factor, "coalesce": "sailine-width-drag", "interpolation": model}),
+        json!({"layer": selection.layer.0, "path": selection.path, "point": selection.point, "factor": factor, "coalesce": "sailine-pressure-drag", "interpolation": model}),
     );
     true
 }
 
-pub fn end_width_drag(app: &mut PhotocraftApp, point: [f64; 2]) {
-    if app.ui.sailine_width_drag.is_none() {
+pub fn end_pressure_drag(app: &mut PhotocraftApp, point: [f64; 2]) {
+    if app.ui.sailine_pressure_drag.is_none() {
         return;
     }
-    width_drag_to(app, point);
-    let Some(drag) = app.ui.sailine_width_drag.take() else { return };
-    let s = drag.selection;
-    let factor = if drag.moved {
-        drag.current_factor
-    } else {
-        let width = app.ui.tool_options.sailine_width;
-        let base = path_width(app, s).unwrap_or(width).max(0.001);
-        (width / base).clamp(0.0, 1000.0)
-    };
-    let model = interpolation_id(app);
-    let _ = app.run(
-        "linework.setPointWidth",
-        json!({"layer": s.layer.0, "path": s.path, "point": s.point, "factor": factor, "coalesce": "sailine-width-drag", "interpolation": model}),
-    );
-    if drag.moved
-        && let Some(base) = path_width(app, s)
-    {
-        app.ui.tool_options.sailine_width = (factor * base).clamp(0.1, 1000.0);
+    pressure_drag_to(app, point);
+    let Some(drag) = app.ui.sailine_pressure_drag.take() else { return };
+    if drag.moved {
+        let model = interpolation_id();
+        let _ = app.run(
+            "linework.setPointWidth",
+            json!({"layer": drag.selection.layer.0, "path": drag.selection.path, "point": drag.selection.point, "factor": drag.current_factor, "coalesce": "sailine-pressure-drag", "interpolation": model}),
+        );
     }
 }
 
-fn nearest_segment(app: &PhotocraftApp, point: [f64; 2]) -> Option<(LayerId, u64, usize, [f64; 2])> {
+fn nearest_segment(app: &PhotocraftApp, point: [f64; 2]) -> Option<(LayerId, u64, usize, [f64; 2], f64)> {
     let state = app.session.active()?;
     let layer_id = state.active_layer?;
     let layer = state.doc.layer(layer_id)?;
     let photocraft_doc::LayerContent::Linework(linework) = &layer.content else { return None };
     let tolerance = 10.0 / f64::from(app.point_zoom().max(0.01));
-    linework
-        .paths
-        .iter()
-        .flat_map(|path| path.points.windows(2).enumerate().map(move |(index, points)| (path.id, index, points[0].position, points[1].position)))
-        .filter_map(|(path, index, a, b)| {
-            let dx = b[0] - a[0];
-            let dy = b[1] - a[1];
-            let len2 = dx * dx + dy * dy;
-            let t = if len2 > 0.0 { ((point[0] - a[0]) * dx + (point[1] - a[1]) * dy) / len2 } else { 0.0 };
-            let t = t.clamp(0.0, 1.0);
-            let closest = [a[0] + t * dx, a[1] + t * dy];
-            let distance = (closest[0] - point[0]).hypot(closest[1] - point[1]);
-            (distance <= tolerance).then_some((distance, path, index + 1, closest))
-        })
-        .min_by(|a, b| a.0.total_cmp(&b.0))
-        .map(|(_, path, index, position)| (layer_id, path, index, position))
+    let mut best: Option<(f64, u64, usize, [f64; 2], f64)> = None;
+    for path in &linework.paths {
+        let points: Vec<_> = path.points.iter().map(|point| point.position).collect();
+        let Ok(curve) =
+            photocraft_vector::linework::interpolate_points_with_model(&points, None, photocraft_vector::linework::InterpolationModel::SaiSimplified)
+        else {
+            continue;
+        };
+        let Some(subpath) = curve.subpaths.first() else { continue };
+        for (index, segment) in subpath.segments().iter().enumerate() {
+            for step in 0..=64 {
+                let t = f64::from(step) / 64.0;
+                let u = 1.0 - t;
+                let position = [
+                    u.powi(3) * segment[0].x + 3.0 * u * u * t * segment[1].x + 3.0 * u * t * t * segment[2].x + t.powi(3) * segment[3].x,
+                    u.powi(3) * segment[0].y + 3.0 * u * u * t * segment[1].y + 3.0 * u * t * t * segment[2].y + t.powi(3) * segment[3].y,
+                ];
+                let distance = (position[0] - point[0]).hypot(position[1] - point[1]);
+                if distance <= tolerance && best.as_ref().is_none_or(|candidate| distance < candidate.0) {
+                    best = Some((distance, path.id, index + 1, position, t));
+                }
+            }
+        }
+    }
+    best.map(|(_, path, index, position, t)| (layer_id, path, index, position, t))
 }
 
 pub fn commit(app: &mut PhotocraftApp) {
     sync(app);
     let Some(draft) = app.ui.sailine.as_ref().filter(|d| d.points.len() >= 2) else { return };
-    let model = interpolation_id(app);
+    let model = interpolation_id();
     let params = json!({"points": draft.points, "width": app.ui.tool_options.sailine_width, "color": app.session.tools.foreground, "interpolation": model});
     match app.run("linework.create", params) {
         Ok(_) => app.ui.sailine = None,
@@ -340,7 +357,7 @@ pub fn commit(app: &mut PhotocraftApp) {
 
 pub fn keys(app: &mut PhotocraftApp, ctx: &egui::Context) -> bool {
     sync(app);
-    if app.ui.tool != Tool::SaiLine || app.ui.sailine.is_none() {
+    if app.ui.tool != Tool::SaiCurve || app.ui.sailine.is_none() {
         return false;
     }
     if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape)) {
@@ -390,37 +407,10 @@ fn draw_round_anchor(painter: &egui::Painter, center: egui::Pos2, selected: bool
 }
 
 pub fn options(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
-    ui.label(if app.ui.tool == Tool::SaiLineWidth { "SaiLine Width" } else { "SaiLine" });
-    let previous_model = interpolation_id(app).to_string();
-    egui::ComboBox::from_id_salt("sailine-interpolation")
-        .selected_text(match previous_model.as_str() {
-            "saiSimplified" => "SAI simplified",
-            "saiOptimized" => "SAI optimized",
-            _ => "Legacy",
-        })
-        .show_ui(ui, |ui| {
-            ui.selectable_value(&mut app.ui.tool_options.sailine_interpolation, "legacy".into(), "Legacy");
-            ui.selectable_value(&mut app.ui.tool_options.sailine_interpolation, "saiSimplified".into(), "SAI simplified");
-            ui.selectable_value(&mut app.ui.tool_options.sailine_interpolation, "saiOptimized".into(), "SAI optimized");
-        });
-    let selected_model = interpolation_id(app);
-    if selected_model != previous_model {
-        if let Err(error) = app.run("linework.setInterpolation", json!({"interpolation": selected_model})) {
-            app.ui.status = error;
-            app.ui.status_error = true;
-        }
-    }
-    ui.label(format!(
-        "Active model: {}",
-        match selected_model {
-            "saiSimplified" => "SAI simplified",
-            "saiOptimized" => "SAI optimized",
-            _ => "Legacy",
-        }
-    ));
-    ui.checkbox(&mut app.ui.tool_options.sailine_compare_legacy, "Compare Legacy centerline");
+    let pressure_tool = app.ui.tool == Tool::SaiPressure;
+    ui.label(if pressure_tool { "SaiPressure" } else { "SaiCurve" });
     ui.label(tl!("Width:"));
-    ui.add(egui::DragValue::new(&mut app.ui.tool_options.sailine_width).range(0.1..=1000.0).suffix(" px"));
+    ui.add(egui::DragValue::new(&mut app.ui.tool_options.sailine_width).range(0.7..=30.0).suffix(" px"));
     if let Some(selection) = app.ui.sailine_selection
         && let Some(factor) = app.session.active().and_then(|state| state.doc.layer(selection.layer)).and_then(|layer| match &layer.content {
             photocraft_doc::LayerContent::Linework(linework) => linework
@@ -432,22 +422,18 @@ pub fn options(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
             _ => None,
         })
     {
-        let mut factor = app.ui.sailine_width_drag.as_ref().map_or(factor, |drag| drag.current_factor);
-        ui.label("Point width:");
-        if ui.add(egui::DragValue::new(&mut factor).range(0.0..=1000.0).speed(0.05)).changed() {
-            let model = selected_model;
-            let _ = app.run(
-                "linework.setPointWidth",
-                json!({"layer": selection.layer.0, "path": selection.path, "point": selection.point, "factor": factor, "interpolation": model}),
-            );
+        let factor = app.ui.sailine_pressure_drag.as_ref().map_or(factor, |drag| drag.current_factor);
+        if pressure_tool {
+            ui.label(format!("Point pressure: {:.0}%", (factor * 100.0).clamp(0.0, 200.0)));
+            ui.label("Ctrl+drag: move · Ctrl+click: add point");
         }
     }
     if let Some(selection) = app.ui.sailine_selection {
         let foreground = screen_color(app.session.tools.foreground);
         if ui.add(egui::Button::new("Path color ← foreground").fill(foreground)).clicked() {
             let color = app.session.tools.foreground;
-            let _ =
-                app.run("linework.setPathColor", json!({"layer": selection.layer.0, "path": selection.path, "color": color, "interpolation": selected_model}));
+            let _ = app
+                .run("linework.setPathColor", json!({"layer": selection.layer.0, "path": selection.path, "color": color, "interpolation": interpolation_id()}));
         }
     }
     ui.label(tl!("Color:"));
@@ -468,8 +454,7 @@ pub fn options(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
 
 pub fn draw(app: &PhotocraftApp, painter: &egui::Painter, xf: &ViewXform) {
     let to_screen = |p: [f64; 2]| xf.to_screen(p[0] as f32, p[1] as f32);
-    let selected_model = interpolation_id(app);
-    if let Some(draft) = app.ui.sailine.as_ref().filter(|d| app.ui.tool == Tool::SaiLine && app.session.active().is_some_and(|s| s.doc.id == d.document)) {
+    if let Some(draft) = app.ui.sailine.as_ref().filter(|d| app.ui.tool == Tool::SaiCurve && app.session.active().is_some_and(|s| s.doc.id == d.document)) {
         let mut points = draft.points.clone();
         if let Some(hover) = app.hover_doc
             && points.len() < 4096
@@ -478,12 +463,19 @@ pub fn draw(app: &PhotocraftApp, painter: &egui::Painter, xf: &ViewXform) {
             points.push(hover);
         }
         let handle = app.hover_doc.filter(|_| draft.points.len() >= 2);
-        let model = photocraft_vector::linework::InterpolationModel::from_id(interpolation_id(app)).unwrap_or_default();
+        let model = photocraft_vector::linework::InterpolationModel::SaiSimplified;
         if let Ok(path) = photocraft_vector::linework::interpolate_points_with_model(&points, handle, model) {
             let color = screen_color(app.session.tools.foreground);
             let width = (app.ui.tool_options.sailine_width * xf.zoom).max(0.5);
             for (curve, _) in crate::vector_ui::path_lines(&path, &to_screen) {
                 painter.add(egui::Shape::line(curve, Stroke::new(width, color)));
+            }
+            let radius = width * 0.5;
+            if let Some(start) = points.first() {
+                painter.circle_filled(to_screen(*start), radius, color);
+            }
+            if let Some(end) = points.last() {
+                painter.circle_filled(to_screen(*end), radius, color);
             }
         }
         let accent = Tokens::get(painter.ctx()).accent;
@@ -500,17 +492,6 @@ pub fn draw(app: &PhotocraftApp, painter: &egui::Painter, xf: &ViewXform) {
         let accent = Tokens::get(painter.ctx()).accent;
         for candidate in linework.paths.iter().flat_map(|path| path.points.iter()) {
             draw_round_anchor(painter, to_screen(candidate.position), selected.contains(&candidate.id) || Some(candidate.id) == hovered, accent);
-        }
-        if app.ui.tool_options.sailine_compare_legacy && selected_model != "legacy" {
-            for path in &linework.paths {
-                let points: Vec<_> = path.points.iter().map(|point| point.position).collect();
-                if let Ok(legacy) = photocraft_vector::linework::interpolate_points_with_handle(&points, path.handle) {
-                    let compare = egui::Color32::from_rgb(0, 210, 255);
-                    for (curve, _) in crate::vector_ui::path_lines(&legacy, &to_screen) {
-                        painter.add(egui::Shape::line(curve, Stroke::new((path.width * xf.zoom as f32).max(1.0), compare)));
-                    }
-                }
-            }
         }
         if let Some(selection) = app.ui.sailine_selection_box {
             let a = to_screen(selection.start);
@@ -529,7 +510,7 @@ mod tests {
     fn app() -> PhotocraftApp {
         let mut app = PhotocraftApp::new(photocraft_engine::Session::new(), Default::default());
         app.run("file.new", json!({"width": 200, "height": 200})).unwrap();
-        app.ui.tool = Tool::SaiLine;
+        app.ui.tool = Tool::SaiCurve;
         app
     }
 
@@ -593,13 +574,132 @@ mod tests {
     }
 
     #[test]
-    fn shift_selection_box_selects_points_inside_bounds() {
+    fn both_sailine_tools_share_ctrl_click_insert_and_ctrl_drag_point_movement() {
+        for tool in [Tool::SaiCurve, Tool::SaiPressure] {
+            let mut app = app();
+            app.run("linework.create", json!({"points": [[20.0, 50.0], [180.0, 50.0]], "width": 4.0})).unwrap();
+            app.ui.tool = tool;
+            let mods = Modifiers::CTRL;
+            tool_event(&mut app, ToolEvent::Down { x: 100.0, y: 52.0, pressure: 1.0 }, mods);
+            tool_event(&mut app, ToolEvent::Up { x: 100.0, y: 52.0 }, mods);
+            let inserted = {
+                let linework = match &app.session.active().unwrap().doc.layer(app.session.active().unwrap().active_layer.unwrap()).unwrap().content {
+                    photocraft_doc::LayerContent::Linework(linework) => linework,
+                    _ => panic!("linework expected"),
+                };
+                assert_eq!(linework.paths[0].points.len(), 3, "Ctrl+click inserts on both tools");
+                linework.paths[0].points[1].position
+            };
+            tool_event(&mut app, ToolEvent::Down { x: inserted[0], y: inserted[1], pressure: 1.0 }, mods);
+            tool_event(&mut app, ToolEvent::Move { x: inserted[0] + 12.0, y: inserted[1] + 9.0, pressure: 1.0 }, mods);
+            tool_event(&mut app, ToolEvent::Up { x: inserted[0] + 12.0, y: inserted[1] + 9.0 }, mods);
+            let layer = app.session.active().unwrap().doc.layer(app.session.active().unwrap().active_layer.unwrap()).unwrap();
+            let photocraft_doc::LayerContent::Linework(linework) = &layer.content else { panic!("linework expected") };
+            assert_eq!(linework.paths[0].points[1].position, [inserted[0] + 12.0, inserted[1] + 9.0], "Ctrl+drag moves the inserted point on both tools");
+            tool_event(&mut app, ToolEvent::Down { x: 20.0, y: 50.0, pressure: 1.0 }, Modifiers::NONE);
+            tool_event(&mut app, ToolEvent::Up { x: 20.0, y: 50.0 }, Modifiers::NONE);
+            tool_event(&mut app, ToolEvent::Down { x: 180.0, y: 50.0, pressure: 1.0 }, Modifiers::SHIFT);
+            tool_event(&mut app, ToolEvent::Up { x: 180.0, y: 50.0 }, Modifiers::SHIFT);
+            assert_eq!(app.ui.sailine_selections.len(), 2, "Shift-click selection should also match on both tools");
+        }
+    }
+
+    #[test]
+    fn sai_pressure_click_only_selects_but_horizontal_drag_changes_zero_to_two_hundred_percent() {
         let mut app = app();
-        app.run("linework.create", json!({"points": [[20.0, 30.0], [100.0, 140.0], [170.0, 40.0]], "width": 3.0})).unwrap();
-        assert!(begin_selection_box(&mut app, [0.0, 0.0]));
-        assert!(selection_box_to(&mut app, [120.0, 150.0]));
-        assert!(end_selection_box(&mut app, [120.0, 150.0]));
-        assert_eq!(app.ui.sailine_selections.len(), 2);
+        app.run("linework.create", json!({"points": [[20.0, 30.0], [160.0, 130.0]], "width": 4.0})).unwrap();
+        let layer_id = app.session.active().unwrap().active_layer.unwrap();
+        let (path, point) = match &app.session.active().unwrap().doc.layer(layer_id).unwrap().content {
+            photocraft_doc::LayerContent::Linework(linework) => (linework.paths[0].id, linework.paths[0].points[0].id),
+            _ => panic!("linework expected"),
+        };
+        app.ui.tool = Tool::SaiPressure;
+        let history = app.session.active().unwrap().history.entries().len();
+        let journal = app.session.journal.len();
+        assert!(begin_pressure_drag(&mut app, [20.0, 30.0]));
+        end_pressure_drag(&mut app, [20.0, 30.0]);
+        assert_eq!(app.session.active().unwrap().history.entries().len(), history);
+        assert_eq!(app.session.journal.len(), journal, "a plain click must not set point pressure");
+
+        assert!(begin_pressure_drag(&mut app, [20.0, 30.0]));
+        assert!(pressure_drag_to(&mut app, [140.0, 30.0]));
+        assert_eq!(app.ui.sailine_pressure_drag.as_ref().map(|drag| drag.current_factor), Some(2.0));
+        end_pressure_drag(&mut app, [140.0, 30.0]);
+        let linework = match &app.session.active().unwrap().doc.layer(layer_id).unwrap().content {
+            photocraft_doc::LayerContent::Linework(linework) => linework,
+            _ => panic!("linework expected"),
+        };
+        assert_eq!(
+            linework
+                .paths
+                .iter()
+                .find(|path_data| path_data.id == path)
+                .and_then(|path_data| path_data.points.iter().find(|p| p.id == point))
+                .map(|p| p.width_factor),
+            Some(2.0)
+        );
+
+        assert!(begin_pressure_drag(&mut app, [20.0, 30.0]));
+        assert!(pressure_drag_to(&mut app, [-220.0, 30.0]));
+        assert_eq!(app.ui.sailine_pressure_drag.as_ref().map(|drag| drag.current_factor), Some(0.0));
+        end_pressure_drag(&mut app, [-220.0, 30.0]);
+        let linework = match &app.session.active().unwrap().doc.layer(layer_id).unwrap().content {
+            photocraft_doc::LayerContent::Linework(linework) => linework,
+            _ => panic!("linework expected"),
+        };
+        assert_eq!(
+            linework
+                .paths
+                .iter()
+                .find(|path_data| path_data.id == path)
+                .and_then(|path_data| path_data.points.iter().find(|p| p.id == point))
+                .map(|p| p.width_factor),
+            Some(0.0)
+        );
+    }
+
+    #[test]
+    fn pressure_preview_throttles_cache_rebuilds_but_release_commits_the_latest_value() {
+        let mut app = app();
+        app.run("linework.create", json!({"points": [[20.0, 30.0], [160.0, 130.0]], "width": 4.0})).unwrap();
+        let layer_id = app.session.active().unwrap().active_layer.unwrap();
+        let (path, point) = match &app.session.active().unwrap().doc.layer(layer_id).unwrap().content {
+            photocraft_doc::LayerContent::Linework(linework) => (linework.paths[0].id, linework.paths[0].points[0].id),
+            _ => panic!("linework expected"),
+        };
+        app.ui.tool = Tool::SaiPressure;
+        assert!(begin_pressure_drag(&mut app, [20.0, 30.0]));
+        let journal_before = app.session.journal.len();
+        assert!(pressure_drag_to(&mut app, [80.0, 30.0]));
+        let after_first_preview = app.session.journal.len();
+        assert_eq!(after_first_preview, journal_before + 1, "first movement should show immediately");
+
+        app.ui.sailine_pressure_drag.as_mut().unwrap().last_preview_at = Some(Instant::now());
+        assert!(pressure_drag_to(&mut app, [90.0, 30.0]));
+        assert_eq!(app.session.journal.len(), after_first_preview, "rapid pointer updates should skip expensive rerenders");
+        let latest = app.ui.sailine_pressure_drag.as_ref().unwrap().current_factor;
+        end_pressure_drag(&mut app, [90.0, 30.0]);
+        assert_eq!(app.session.journal.len(), after_first_preview + 1, "release must commit the final value");
+        let factor = match &app.session.active().unwrap().doc.layer(layer_id).unwrap().content {
+            photocraft_doc::LayerContent::Linework(linework) => {
+                linework.paths.iter().find(|p| p.id == path).unwrap().points.iter().find(|p| p.id == point).unwrap().width_factor
+            }
+            _ => panic!("linework expected"),
+        };
+        assert_eq!(factor, latest);
+    }
+
+    #[test]
+    fn shift_selection_box_selects_points_inside_bounds() {
+        for tool in [Tool::SaiCurve, Tool::SaiPressure] {
+            let mut app = app();
+            app.run("linework.create", json!({"points": [[20.0, 30.0], [100.0, 140.0], [170.0, 40.0]], "width": 3.0})).unwrap();
+            app.ui.tool = tool;
+            assert!(begin_selection_box(&mut app, [0.0, 0.0]));
+            assert!(selection_box_to(&mut app, [120.0, 150.0]));
+            assert!(end_selection_box(&mut app, [120.0, 150.0]));
+            assert_eq!(app.ui.sailine_selections.len(), 2);
+        }
     }
 
     #[test]
@@ -609,7 +709,7 @@ mod tests {
         app.ui.tool = Tool::Brush;
         sync(&mut app);
         assert!(app.ui.sailine.is_none());
-        app.ui.tool = Tool::SaiLine;
+        app.ui.tool = Tool::SaiCurve;
         click(&mut app, 20.0, 30.0);
         app.run("file.new", json!({"width": 100, "height": 100})).unwrap();
         commit(&mut app);

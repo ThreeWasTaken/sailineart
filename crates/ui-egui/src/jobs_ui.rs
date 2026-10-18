@@ -573,14 +573,7 @@ pub(crate) fn after_open(app: &mut PhotocraftApp, name: &str, path: Option<&str>
     if let Some(p) = path {
         app.opened_from(p);
     }
-    let model = match app.ui.tool_options.sailine_interpolation.as_str() {
-        "saiSimplified" => Some("saiSimplified"),
-        "saiOptimized" => Some("saiOptimized"),
-        _ => None,
-    };
-    if let Some(model) = model {
-        let _ = app.session.execute("linework.setInterpolation", serde_json::json!({"interpolation": model}));
-    }
+    let _ = app.session.execute("linework.setInterpolation", serde_json::json!({"interpolation": "saiSimplified"}));
     app.sync_views();
     // Fonts the document's type uses that aren't installed join the import warnings (#4559).
     let warnings = crate::file_open::with_missing_fonts(app, warnings.to_vec());

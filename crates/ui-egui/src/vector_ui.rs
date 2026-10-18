@@ -1034,7 +1034,7 @@ pub fn draw_overlay(app: &PhotocraftApp, painter: &egui::Painter, xf: &ViewXform
 
 /// Options bar for vector tools; false for other tools.
 pub fn options_bar(app: &mut PhotocraftApp, ui: &mut egui::Ui, tool: Tool) -> bool {
-    if matches!(tool, Tool::SaiLine | Tool::SaiLineWidth) {
+    if matches!(tool, Tool::SaiCurve | Tool::SaiPressure) {
         crate::sailine_ui::options(app, ui);
         return true;
     }

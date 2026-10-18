@@ -467,7 +467,7 @@ pub fn handle(app: &mut PhotocraftApp, ctx: &egui::Context) {
     if crate::sailine_ui::keys(app, ctx) {
         return;
     }
-    // Ctrl+Y is a common platform alias for Redo. Keep it available after a SaiLine commit in
+    // Ctrl+Y is a common platform alias for Redo. Keep it available after a SaiCurve commit in
     // addition to the configured Cmd/Ctrl+Shift+Z binding.
     if ctx.input_mut(|i| i.consume_key(Modifiers::CTRL, Key::Y)) {
         let _ = app.run("edit.redo", json!({}));

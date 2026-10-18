@@ -37,7 +37,7 @@ const TOOL_SECTIONS: &[&[&[Tool]]] = &[
     ],
     &[
         &[Tool::Pen, Tool::FreeformPen, Tool::CurvaturePen, Tool::AddAnchorPoint, Tool::DeleteAnchorPoint, Tool::ConvertPoint],
-        &[Tool::SaiLine, Tool::SaiLineWidth],
+        &[Tool::SaiCurve, Tool::SaiPressure],
         &[Tool::Type, Tool::VerticalType, Tool::VerticalTypeMask, Tool::HorizontalTypeMask],
         &[Tool::PathSelection, Tool::DirectSelection],
         &[Tool::Rectangle, Tool::EllipseShape, Tool::Triangle, Tool::Polygon, Tool::Line, Tool::CustomShape],
@@ -969,7 +969,7 @@ pub fn options_bar(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
                     return;
                 }
                 let tool = app.ui.tool;
-                if matches!(tool, Tool::SaiLine | Tool::SaiLineWidth) {
+                if matches!(tool, Tool::SaiCurve | Tool::SaiPressure) {
                     crate::sailine_ui::options(app, ui);
                     return;
                 }

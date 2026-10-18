@@ -52,13 +52,13 @@ fn both_tools_join_the_pen_group() {
             Tool::Pen,
             Tool::FreeformPen,
             Tool::CurvaturePen,
-            Tool::SaiLine,
-            Tool::SaiLineWidth,
+            Tool::SaiCurve,
+            Tool::SaiPressure,
             Tool::AddAnchorPoint,
             Tool::DeleteAnchorPoint,
             Tool::ConvertPoint
         ],
-        "P cycles Pen → Freeform → Curvature → SaiLine → SaiLine Width → Add → Delete → Convert Point"
+        "P cycles Pen → Freeform → Curvature → SaiCurve → SaiPressure → Add → Delete → Convert Point"
     );
     let mut app = app(Tool::Brush);
     app.ui.tool = Tool::from_name("addAnchorPoint").unwrap();

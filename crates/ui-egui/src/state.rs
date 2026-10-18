@@ -119,8 +119,10 @@ pub enum Tool {
     Pen,
     FreeformPen,
     CurvaturePen,
-    SaiLine,
-    SaiLineWidth,
+    #[serde(alias = "SaiLine")]
+    SaiCurve,
+    #[serde(alias = "SaiLineWidth")]
+    SaiPressure,
     AddAnchorPoint,
     DeleteAnchorPoint,
     /// Converts an anchor between smooth and corner, and pulls handles out of a corner
@@ -141,10 +143,6 @@ pub enum Tool {
 
 fn default_sailine_width() -> f32 {
     3.0
-}
-
-fn default_sailine_interpolation() -> String {
-    "legacy".into()
 }
 
 impl Tool {
@@ -202,8 +200,8 @@ impl Tool {
         Tool::Pen,
         Tool::FreeformPen,
         Tool::CurvaturePen,
-        Tool::SaiLine,
-        Tool::SaiLineWidth,
+        Tool::SaiCurve,
+        Tool::SaiPressure,
         Tool::AddAnchorPoint,
         Tool::DeleteAnchorPoint,
         Tool::ConvertPoint,
@@ -278,8 +276,8 @@ impl Tool {
             Tool::Pen => "Pen Tool",
             Tool::FreeformPen => "Freeform Pen Tool",
             Tool::CurvaturePen => "Curvature Pen Tool",
-            Tool::SaiLine => "SaiLine Tool",
-            Tool::SaiLineWidth => "SaiLine Width Tool",
+            Tool::SaiCurve => "SaiCurve Tool",
+            Tool::SaiPressure => "SaiPressure Tool",
             Tool::AddAnchorPoint => "Add Anchor Point Tool",
             Tool::DeleteAnchorPoint => "Delete Anchor Point Tool",
             Tool::ConvertPoint => "Convert Point Tool",
@@ -357,8 +355,8 @@ impl Tool {
             Tool::Pen
             | Tool::FreeformPen
             | Tool::CurvaturePen
-            | Tool::SaiLine
-            | Tool::SaiLineWidth
+            | Tool::SaiCurve
+            | Tool::SaiPressure
             | Tool::AddAnchorPoint
             | Tool::DeleteAnchorPoint
             | Tool::ConvertPoint => 'P',
@@ -390,6 +388,12 @@ impl Tool {
     }
     pub fn from_name(s: &str) -> Option<Tool> {
         let n = s.to_ascii_lowercase().replace([' ', '_', '-'], "");
+        if n == "sailinewidth" {
+            return Some(Tool::SaiPressure);
+        }
+        if n == "sailine" {
+            return Some(Tool::SaiCurve);
+        }
         Tool::ALL.into_iter().find(|t| {
             let a = format!("{t:?}").to_ascii_lowercase();
             n == a || n == a.replace("marquee", "") || n == t.label().to_ascii_lowercase().replace(' ', "")
@@ -603,12 +607,6 @@ pub struct ToolOptions {
     pub stroke_width: f32,
     #[serde(default = "default_sailine_width")]
     pub sailine_width: f32,
-    /// Temporary SaiLine geometry preview. This lives in UI preferences, never in document data.
-    #[serde(default = "default_sailine_interpolation")]
-    pub sailine_interpolation: String,
-    /// Overlay the Legacy centerline while another SaiLine interpolation is active.
-    #[serde(default)]
-    pub sailine_compare_legacy: bool,
     #[serde(default)]
     pub shape_stroke: crate::shape_stroke_ui::StrokeOptions,
     pub corner_radius: f32,
@@ -829,8 +827,6 @@ impl Default for ToolOptions {
             shape_fill: true,
             stroke_width: 0.0,
             sailine_width: default_sailine_width(),
-            sailine_interpolation: default_sailine_interpolation(),
-            sailine_compare_legacy: false,
             shape_stroke: Default::default(),
             corner_radius: 0.0,
             polygon_sides: 5,
@@ -1172,7 +1168,7 @@ pub struct UiState {
     #[serde(default, skip_deserializing)]
     pub sailine_point_drag: Option<crate::sailine_ui::PointDrag>,
     #[serde(default, skip_deserializing)]
-    pub sailine_width_drag: Option<crate::sailine_ui::PointWidthDrag>,
+    pub sailine_pressure_drag: Option<crate::sailine_ui::PointPressureDrag>,
     #[serde(default, skip_deserializing)]
     pub sailine_selection_box: Option<crate::sailine_ui::SelectionBox>,
     #[serde(default)]
@@ -1358,7 +1354,7 @@ impl Default for UiState {
             sailine_selection: None,
             sailine_selections: Vec::new(),
             sailine_point_drag: None,
-            sailine_width_drag: None,
+            sailine_pressure_drag: None,
             sailine_selection_box: None,
             stroke_editor: None,
             direct_selection: Default::default(),
@@ -1466,7 +1462,13 @@ mod tests {
         assert!(!Tool::RedEye.is_brushlike());
         assert_eq!(Tool::from_name("patternStamp"), Some(Tool::PatternStamp));
         assert_eq!(Tool::from_name("Pattern Stamp Tool"), Some(Tool::PatternStamp));
-        assert_eq!(Tool::ALL.len(), 68);
+        assert_eq!(Tool::from_name("SaiLineWidth"), Some(Tool::SaiPressure));
+        assert_eq!(Tool::from_name("SaiLine"), Some(Tool::SaiCurve));
+        assert_eq!(Tool::from_name("SaiCurve"), Some(Tool::SaiCurve));
+        assert_eq!(Tool::from_name("SaiPressure"), Some(Tool::SaiPressure));
+        assert_eq!(serde_json::from_str::<Tool>("\"SaiLineWidth\"").unwrap(), Tool::SaiPressure);
+        assert_eq!(serde_json::from_str::<Tool>("\"SaiLine\"").unwrap(), Tool::SaiCurve);
+        assert_eq!(Tool::ALL.len(), 69);
         assert_eq!(Tool::from_name("Vertical Type Mask Tool"), Some(Tool::VerticalTypeMask));
         assert_eq!(Tool::from_name("addAnchorPoint"), Some(Tool::AddAnchorPoint));
         assert_eq!(Tool::from_name("Delete Anchor Point Tool"), Some(Tool::DeleteAnchorPoint));

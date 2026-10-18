@@ -215,4 +215,11 @@ mod tests {
         assert_eq!(decoded, layer);
         decoded.validate().unwrap();
     }
+
+    #[test]
+    fn old_point_records_without_a_width_factor_default_to_one_hundred_percent() {
+        let point: LineworkPoint = serde_json::from_value(serde_json::json!({"id": 41, "position": [12.0, 18.0]})).unwrap();
+        assert_eq!(point.width_factor, 1.0);
+        assert_eq!(point.position, [12.0, 18.0]);
+    }
 }

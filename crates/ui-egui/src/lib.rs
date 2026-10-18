@@ -1048,18 +1048,9 @@ impl PhotocraftApp {
         } else {
             jobs_ui::run(self, id, params)
         };
-        if r.is_ok()
-            && matches!(id, "edit.undo" | "edit.redo" | "file.revert")
-            && let Some(model) = self.session.active().map(|_| self.ui.tool_options.sailine_interpolation.clone())
-        {
-            // Undo/redo restore ephemeral raster snapshots too; loading may restore a cache made
-            // by a different temporary mode. Rebuild from the canonical anchors after either.
-            let model = match model.as_str() {
-                "saiSimplified" => "saiSimplified",
-                "saiOptimized" => "saiOptimized",
-                _ => "legacy",
-            };
-            let _ = self.session.execute("linework.setInterpolation", json!({"interpolation": model}));
+        if r.is_ok() && matches!(id, "edit.undo" | "edit.redo" | "file.revert") && self.session.active().is_some() {
+            // Undo/redo restore ephemeral raster snapshots too; rebuild with the production model.
+            let _ = self.session.execute("linework.setInterpolation", json!({"interpolation": "saiSimplified"}));
         }
         let creates_adjustment_or_fill = id.starts_with("layer.newAdjustmentLayer.") || id.starts_with("layer.newFillLayer.");
         if r.is_ok() && (ADDS_LAYER_MASK.contains(&id) || creates_adjustment_or_fill) {
