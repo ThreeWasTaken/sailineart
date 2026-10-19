@@ -9,7 +9,10 @@
 //! cancels. Undo and Redo step through the session's own changes (`Steps`), not the document's
 //! history.
 
-use std::sync::Arc;
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use egui::{Color32, CursorIcon, Pos2, Stroke, pos2, vec2};
 use photocraft_algo::transform::Homography;
@@ -91,6 +94,21 @@ pub struct TransformPreview {
     committing: Option<JobId>,
     /// Content-Aware Scale's live preview (cas_transform.rs).
     pub(crate) content_aware: Option<crate::cas_transform::Live>,
+    /// SaiLine transforms live point coordinates; the pixel preview is only a host for the shared
+    /// transform frame and gesture machinery.
+    sailine_points: Option<SaiLineTransform>,
+}
+
+pub(crate) fn is_sailine_points_preview(preview: &TransformPreview) -> bool {
+    preview.sailine_points.is_some()
+}
+
+#[derive(Clone)]
+struct SaiLineTransform {
+    selections: Vec<crate::sailine_ui::Selection>,
+    origins: Vec<[f64; 2]>,
+    coalesce: String,
+    last_preview_at: Option<Instant>,
 }
 
 /// What [`follow_edits`] needs to rebuild the preview document.
@@ -172,6 +190,17 @@ fn corners(r: [f64; 4]) -> [[f64; 2]; 4] {
 /// Start Free Transform on the active layer (or its selected pixels), or on the targeted unlinked
 /// layer mask, alpha channel or Quick Mask.
 pub fn begin(app: &mut PhotocraftApp, ctx: &egui::Context) -> Result<(), String> {
+    // SaiLine has no raster payload for the generic layer transform to commit. With no
+    // individual points selected, Ctrl+T on a SaiLine tool therefore targets all control points
+    // in the active linework layer and uses the same live vector transform path.
+    if crate::sailine_ui::is_sailine_tool(app.ui.tool) && app.ui.sailine_selections.is_empty() {
+        select_active_linework_points(app);
+    }
+    if !app.ui.sailine_selections.is_empty()
+        && let Some(()) = begin_sailine_points(app, ctx)?
+    {
+        return Ok(());
+    }
     if let Some((params, path)) = crate::vector_ui::free_transform_path(app) {
         return begin_path(app, ctx, params, path);
     }
@@ -244,6 +273,7 @@ pub fn begin(app: &mut PhotocraftApp, ctx: &egui::Context) -> Result<(), String>
         tool: app.ui.tool,
         path: None,
         content_aware: None,
+        sailine_points: None,
     });
     app.ui.transform = Some(TransformSession {
         session,
@@ -263,6 +293,114 @@ pub fn begin(app: &mut PhotocraftApp, ctx: &egui::Context) -> Result<(), String>
     });
     start_steps(app);
     Ok(())
+}
+
+fn select_active_linework_points(app: &mut PhotocraftApp) {
+    let Some(state) = app.session.active() else { return };
+    let Some(layer) = state.active_layer else { return };
+    let Some(layer_ref) = state.doc.layer(layer) else { return };
+    let LayerContent::Linework(linework) = &layer_ref.content else { return };
+    let selections: Vec<_> = linework
+        .paths
+        .iter()
+        .flat_map(|path| path.points.iter().map(|point| crate::sailine_ui::Selection { document: state.doc.id, layer, path: path.id, point: point.id }))
+        .collect();
+    if !selections.is_empty() {
+        app.ui.sailine_selection = selections.first().copied();
+        app.ui.sailine_selections = selections;
+    }
+}
+
+/// Ctrl+T on a SaiLine point selection opens the shared transform frame without lifting or
+/// rasterizing the vector layer. Stable point ids are captured for the entire session.
+fn begin_sailine_points(app: &mut PhotocraftApp, ctx: &egui::Context) -> Result<Option<()>, String> {
+    let Some(st) = app.session.active() else { return Ok(None) };
+    let doc = st.doc.clone();
+    let selections: Vec<_> = app
+        .ui
+        .sailine_selections
+        .iter()
+        .copied()
+        .filter(|s| s.document == doc.id)
+        .filter(|s| {
+            doc.layer(s.layer).is_some_and(|layer| {
+                matches!(&layer.content, LayerContent::Linework(lw) if lw.paths.iter().any(|p| p.id == s.path && p.points.iter().any(|pt| pt.id == s.point)))
+            })
+        })
+        .collect();
+    if selections.is_empty() {
+        return Ok(None);
+    }
+    let origins: Vec<_> = selections
+        .iter()
+        .filter_map(|s| match &doc.layer(s.layer)?.content {
+            LayerContent::Linework(lw) => lw.paths.iter().find(|p| p.id == s.path)?.points.iter().find(|p| p.id == s.point).map(|p| p.position),
+            _ => None,
+        })
+        .collect();
+    if origins.len() != selections.len() {
+        return Err("Some selected SaiLine points no longer exist".into());
+    }
+    let min_x = origins.iter().map(|p| p[0]).fold(f64::INFINITY, f64::min);
+    let max_x = origins.iter().map(|p| p[0]).fold(f64::NEG_INFINITY, f64::max);
+    let min_y = origins.iter().map(|p| p[1]).fold(f64::INFINITY, f64::min);
+    let max_y = origins.iter().map(|p| p[1]).fold(f64::NEG_INFINITY, f64::max);
+    // A minimally expanded frame gives degenerate point bounds usable handles while the
+    // selected point coordinates themselves remain the exact centerline of that degenerate axis.
+    let pad_axis = |lo: f64, hi: f64| {
+        if hi - lo < 1e-6 { [lo - 5e-7, hi + 5e-7] } else { [lo, hi] }
+    };
+    let [x0, x1] = pad_axis(min_x, max_x);
+    let [y0, y1] = pad_axis(min_y, max_y);
+    let rect = [x0, y0, x1, y1];
+    crate::type_tool::commit(app);
+    let session = app.ui.alloc_id();
+    let layer = selections.first().map_or(0, |s| s.layer.0);
+    let texture = crate::transform_tex::PreviewTextures::new(
+        ctx,
+        format!("transform-{session}-sailine"),
+        egui::ColorImage::new([1, 1], vec![Color32::TRANSPARENT]),
+        [1.0, 1.0],
+    );
+    app.transform_preview = Some(TransformPreview {
+        session,
+        doc: doc.clone(),
+        texture,
+        opacity: 1.0,
+        above: None,
+        styled: None,
+        gesture: None,
+        warp_drag: None,
+        split_tool: None,
+        split_pointer: None,
+        split_placing: false,
+        split_quick: false,
+        steps: Steps::default(),
+        tool: app.ui.tool,
+        path: None,
+        follow: None,
+        committing: None,
+        content_aware: None,
+        sailine_points: Some(SaiLineTransform { selections, origins, coalesce: format!("sailine-transform:{session}"), last_preview_at: None }),
+    });
+    app.ui.transform = Some(TransformSession {
+        session,
+        layer,
+        rect,
+        quad: corners(rect),
+        pivot: [(rect[0] + rect[2]) * 0.5, (rect[1] + rect[3]) * 0.5],
+        interpolation: "bicubic".into(),
+        warp: None,
+        selection: false,
+        target: None,
+        path: None,
+        made: None,
+        mode: TransformMode::Free,
+        content_aware: None,
+        skew_v: 0.0,
+    });
+    start_steps(app);
+    Ok(Some(()))
 }
 
 /// Free Transform on a copy (⌥⌘T, no menu item): duplicates the active layer (with a selection,
@@ -345,6 +483,7 @@ pub(crate) fn begin_content_aware(
         path: None,
         content_aware: Some(live),
         styled: None,
+        sailine_points: None,
     });
     app.ui.transform = Some(TransformSession {
         session,
@@ -466,6 +605,7 @@ fn begin_lone(
         tool: app.ui.tool,
         path: None,
         content_aware: None,
+        sailine_points: None,
     });
     app.ui.transform = Some(TransformSession {
         session,
@@ -516,6 +656,7 @@ fn begin_path(app: &mut PhotocraftApp, ctx: &egui::Context, params: serde_json::
         tool: app.ui.tool,
         path: Some(path),
         content_aware: None,
+        sailine_points: None,
         above: None,
         follow: None,
         committing: None,
@@ -604,6 +745,7 @@ pub fn begin_selection(app: &mut PhotocraftApp, ctx: &egui::Context) -> Result<(
         tool: app.ui.tool,
         path: None,
         content_aware: None,
+        sailine_points: None,
     });
     app.ui.transform = Some(TransformSession {
         session,
@@ -977,6 +1119,11 @@ pub fn commit(app: &mut PhotocraftApp) {
     if committing(app).is_some() {
         return;
     }
+    if app.transform_preview.as_ref().is_some_and(|pv| pv.sailine_points.is_some()) {
+        app.ui.transform = None;
+        app.transform_preview = None;
+        return;
+    }
     let document = app.transform_preview.as_ref().map(|pv| pv.doc.id);
     if document.is_some_and(|id| app.session.active().is_none_or(|st| st.doc.id != id)) {
         cancel(app);
@@ -1166,6 +1313,17 @@ pub fn cancel(app: &mut PhotocraftApp) {
         crate::jobs_ui::cancel(app, job);
         return;
     }
+    if let Some(target) = app.transform_preview.as_ref().and_then(|pv| pv.sailine_points.clone()) {
+        // All live updates share one key. Undoing that coalesced step restores the exact starting
+        // document and removes the cancelled transform from history altogether.
+        if app.session.active().is_some_and(|st| st.coalesce.as_deref() == Some(target.coalesce.as_str())) {
+            let _ = app.session.undo();
+            app.sync_views();
+        }
+        app.ui.transform = None;
+        app.transform_preview = None;
+        return;
+    }
     let transform = app.ui.transform.take();
     let preview = app.transform_preview.take();
     if let (Some(t), Some(pv)) = (transform, preview)
@@ -1349,6 +1507,9 @@ pub fn pointer(app: &mut PhotocraftApp, ev: ToolEvent, mods: egui::Modifiers) ->
     if committing(app).is_some() {
         return true;
     }
+    if app.transform_preview.as_ref().is_some_and(|pv| pv.sailine_points.is_some()) {
+        return sailine_pointer(app, ev, mods, t);
+    }
     let tol = handle_tolerance(app);
     if t.warp.is_some() {
         warp_pointer(app, ev, tol, mods);
@@ -1405,6 +1566,101 @@ pub fn pointer(app: &mut PhotocraftApp, ev: ToolEvent, mods: egui::Modifiers) ->
         }
     }
     true
+}
+
+fn sailine_pointer(app: &mut PhotocraftApp, ev: ToolEvent, mods: egui::Modifiers, before: TransformSession) -> bool {
+    let tol = handle_tolerance(app);
+    match ev {
+        ToolEvent::Down { x, y, .. } => {
+            let mut h = hit(&before, [x, y], tol);
+            if h == Hit::Pivot {
+                h = Hit::Inside;
+            }
+            if let Some(pv) = app.transform_preview.as_mut() {
+                pv.gesture = Some(Gesture { hit: h, start: [x, y], quad0: before.quad, pivot0: before.pivot });
+                if let Some(target) = pv.sailine_points.as_mut() {
+                    target.last_preview_at = None;
+                }
+            }
+        }
+        ToolEvent::Move { x, y, .. } | ToolEvent::Up { x, y } => {
+            let Some(g) = app.transform_preview.as_ref().and_then(|pv| pv.gesture) else { return true };
+            let released = matches!(ev, ToolEvent::Up { .. });
+            let now = Instant::now();
+            if !released {
+                let Some(target) = app.transform_preview.as_mut().and_then(|pv| pv.sailine_points.as_mut()) else { return true };
+                if target.last_preview_at.is_some_and(|last| now.duration_since(last) < Duration::from_millis(33)) {
+                    return true;
+                }
+                target.last_preview_at = Some(now);
+            }
+            if released && accepts_outside_click(g, [x, y], tol) {
+                commit(app);
+                return true;
+            }
+            if released && let Some(pv) = app.transform_preview.as_mut() {
+                pv.gesture = None;
+            }
+            let mut next = before.clone();
+            let mut drag_mods = mods;
+            drag_mods.command = false;
+            drag_mods.alt = false;
+            // Sai-style modifier: Shift preserves corner proportions; edge handles always stretch
+            // along their own axis. The shared frame's default modifier is the inverse for corners.
+            match g.hit {
+                Hit::Corner(_) => drag_mods.shift = !mods.shift,
+                Hit::Edge(_) => drag_mods.shift = true,
+                Hit::Outside => drag_mods.shift = false,
+                _ => {}
+            }
+            apply_drag(&mut next, g, [x, y], drag_mods);
+            if g.hit == Hit::Outside && mods.shift {
+                let a0 = (g.start[1] - g.pivot0[1]).atan2(g.start[0] - g.pivot0[0]);
+                let a1 = (y - g.pivot0[1]).atan2(x - g.pivot0[0]);
+                let base = (g.quad0[1][1] - g.quad0[0][1]).atan2(g.quad0[1][0] - g.quad0[0][0]);
+                let step = 45_f64.to_radians();
+                let da = ((base + a1 - a0) / step).round() * step - base;
+                let (sn, cs) = da.sin_cos();
+                next.quad = g.quad0.map(|q| {
+                    let (dx, dy) = (q[0] - g.pivot0[0], q[1] - g.pivot0[1]);
+                    [g.pivot0[0] + dx * cs - dy * sn, g.pivot0[1] + dx * sn + dy * cs]
+                });
+            }
+            if apply_sailine_quad(app, &next) {
+                app.ui.transform = Some(next);
+                if let Some(target) = app.transform_preview.as_mut().and_then(|pv| pv.sailine_points.as_mut()) {
+                    target.last_preview_at = Some(now);
+                }
+            }
+        }
+    }
+    true
+}
+
+/// Map captured point positions through the frame's bilinear patch. For the supported classic
+/// transforms the quad is affine, and this formula remains finite even when a dimension collapses.
+fn apply_sailine_quad(app: &mut PhotocraftApp, t: &TransformSession) -> bool {
+    let Some(target) = app.transform_preview.as_ref().and_then(|pv| pv.sailine_points.clone()) else { return false };
+    let (w, h) = (t.rect[2] - t.rect[0], t.rect[3] - t.rect[1]);
+    if !(w > 0.0 && h > 0.0) {
+        return false;
+    }
+    let points: Vec<_> = target
+        .selections
+        .iter()
+        .zip(target.origins.iter())
+        .map(|(selection, p)| {
+            let (u, v) = ((p[0] - t.rect[0]) / w, (p[1] - t.rect[1]) / h);
+            let [a, b, c, d] = t.quad;
+            let x = a[0] * (1.0 - u) * (1.0 - v) + b[0] * u * (1.0 - v) + c[0] * u * v + d[0] * (1.0 - u) * v;
+            let y = a[1] * (1.0 - u) * (1.0 - v) + b[1] * u * (1.0 - v) + c[1] * u * v + d[1] * (1.0 - u) * v;
+            json!({"layer": selection.layer.0, "path": selection.path, "point": selection.point, "x": x, "y": y})
+        })
+        .collect();
+    let finite = points.iter().all(|p| {
+        p["x"].as_f64().is_some_and(|v| v.is_finite() && v.abs() <= 1_000_000.0) && p["y"].as_f64().is_some_and(|v| v.is_finite() && v.abs() <= 1_000_000.0)
+    });
+    finite && app.run("linework.movePoints", json!({"points": points, "coalesce": target.coalesce, "interpolation": "saiSimplified"})).is_ok()
 }
 
 /// Editable type can be scaled, rotated and skewed but not distorted (#2630): the rule that greys
@@ -2061,49 +2317,51 @@ pub fn draw_overlay(app: &PhotocraftApp, painter: &egui::Painter, xf: &ViewXform
         return;
     }
     let ctx = painter.ctx();
-    let styled = styled_frame(app, xf.zoom * ctx.pixels_per_point(), ctx.input(|i| i.pointer.any_down())).and_then(|(s, frame)| s.texture(ctx, &frame));
-    if let Some((tex, r)) = styled {
-        let mut mesh = egui::Mesh::with_texture(tex);
-        for (x, y, u, v) in [(r[0], r[1], 0.0, 0.0), (r[2], r[1], 1.0, 0.0), (r[2], r[3], 1.0, 1.0), (r[0], r[3], 0.0, 1.0)] {
-            mesh.vertices.push(egui::epaint::Vertex { pos: pos2(x, y), uv: pos2(u, v), color: Color32::WHITE });
-        }
-        mesh.add_triangle(0, 1, 2);
-        mesh.add_triangle(0, 2, 3);
-        painter.add(clip_to_canvas(mesh, canvas_size(pv), |p| xf.to_screen(p.x, p.y)));
-    } else if let Some(h) = Homography::rect_to_quad([0.0, 0.0, 1.0, 1.0], t.quad) {
-        // A 24×24 grid keeps perspective previews straight.
-        let n = 24;
-        let zoom = xf.zoom * painter.ctx().pixels_per_point();
-        // Content-Aware Scale shows its latest live result once there is one.
-        let (tex, uv) = match pv.content_aware.as_ref().and_then(|l| l.shown(t)) {
-            Some((texture, texel)) => texture.pick(painter.ctx(), zoom, texel, false),
-            None => pv.texture.pick(painter.ctx(), zoom, quad_scale(t), t.interpolation == "nearest"),
-        };
-        let mut mesh = egui::Mesh::with_texture(tex);
-        let tint = Color32::from_white_alpha((pv.opacity.clamp(0.0, 1.0) * 255.0) as u8);
-        let ahead = front_vertices(&h, n);
-        for j in 0..=n {
-            for i in 0..=n {
-                let (u, v) = (i as f64 / n as f64, j as f64 / n as f64);
-                let (x, y) = h.apply(u, v);
-                mesh.vertices.push(egui::epaint::Vertex { pos: pos2(x as f32, y as f32), uv: pos2(u as f32 * uv[0], v as f32 * uv[1]), color: tint });
+    if pv.sailine_points.is_none() {
+        let styled = styled_frame(app, xf.zoom * ctx.pixels_per_point(), ctx.input(|i| i.pointer.any_down())).and_then(|(s, frame)| s.texture(ctx, &frame));
+        if let Some((tex, r)) = styled {
+            let mut mesh = egui::Mesh::with_texture(tex);
+            for (x, y, u, v) in [(r[0], r[1], 0.0, 0.0), (r[2], r[1], 1.0, 0.0), (r[2], r[3], 1.0, 1.0), (r[0], r[3], 0.0, 1.0)] {
+                mesh.vertices.push(egui::epaint::Vertex { pos: pos2(x, y), uv: pos2(u, v), color: Color32::WHITE });
             }
-        }
-        for j in 0..n {
-            for i in 0..n {
-                let a = (j * (n + 1) + i) as u32;
-                for tri in [[a, a + 1, a + n as u32 + 2], [a, a + n as u32 + 2, a + n as u32 + 1]] {
-                    // A cell with a corner past the horizon would stretch across the canvas (#4863).
-                    if tri.iter().all(|&k| ahead[k as usize]) {
-                        mesh.add_triangle(tri[0], tri[1], tri[2]);
+            mesh.add_triangle(0, 1, 2);
+            mesh.add_triangle(0, 2, 3);
+            painter.add(clip_to_canvas(mesh, canvas_size(pv), |p| xf.to_screen(p.x, p.y)));
+        } else if let Some(h) = Homography::rect_to_quad([0.0, 0.0, 1.0, 1.0], t.quad) {
+            // A 24×24 grid keeps perspective previews straight.
+            let n = 24;
+            let zoom = xf.zoom * painter.ctx().pixels_per_point();
+            // Content-Aware Scale shows its latest live result once there is one.
+            let (tex, uv) = match pv.content_aware.as_ref().and_then(|l| l.shown(t)) {
+                Some((texture, texel)) => texture.pick(painter.ctx(), zoom, texel, false),
+                None => pv.texture.pick(painter.ctx(), zoom, quad_scale(t), t.interpolation == "nearest"),
+            };
+            let mut mesh = egui::Mesh::with_texture(tex);
+            let tint = Color32::from_white_alpha((pv.opacity.clamp(0.0, 1.0) * 255.0) as u8);
+            let ahead = front_vertices(&h, n);
+            for j in 0..=n {
+                for i in 0..=n {
+                    let (u, v) = (i as f64 / n as f64, j as f64 / n as f64);
+                    let (x, y) = h.apply(u, v);
+                    mesh.vertices.push(egui::epaint::Vertex { pos: pos2(x as f32, y as f32), uv: pos2(u as f32 * uv[0], v as f32 * uv[1]), color: tint });
+                }
+            }
+            for j in 0..n {
+                for i in 0..n {
+                    let a = (j * (n + 1) + i) as u32;
+                    for tri in [[a, a + 1, a + n as u32 + 2], [a, a + n as u32 + 2, a + n as u32 + 1]] {
+                        // A cell with a corner past the horizon would stretch across the canvas (#4863).
+                        if tri.iter().all(|&k| ahead[k as usize]) {
+                            mesh.add_triangle(tri[0], tri[1], tri[2]);
+                        }
                     }
                 }
             }
+            painter.add(clip_to_canvas(mesh, canvas_size(pv), |p| xf.to_screen(p.x, p.y)));
         }
-        painter.add(clip_to_canvas(mesh, canvas_size(pv), |p| xf.to_screen(p.x, p.y)));
-    }
-    if let Some(a) = &pv.above {
-        a.draw(painter, xf);
+        if let Some(a) = &pv.above {
+            a.draw(painter, xf);
+        }
     }
     if pv.committing.is_some() {
         return;
@@ -2128,12 +2386,14 @@ pub fn draw_overlay(app: &PhotocraftApp, painter: &egui::Painter, xf: &ViewXform
         painter.rect_filled(r, 0.0, Color32::WHITE);
         painter.rect_stroke(r, 0.0, Stroke::new(1.0, accent), egui::StrokeKind::Inside);
     }
-    // Reference point (Photoshop's crosshair circle).
-    let c = scr(t.pivot);
-    painter.circle_stroke(c, 5.0, Stroke::new(1.0, Color32::WHITE));
-    painter.circle_stroke(c, 5.0, Stroke::new(0.5, Color32::BLACK));
-    painter.line_segment([c - vec2(8.0, 0.0), c + vec2(8.0, 0.0)], Stroke::new(1.0, Color32::WHITE));
-    painter.line_segment([c - vec2(0.0, 8.0), c + vec2(0.0, 8.0)], Stroke::new(1.0, Color32::WHITE));
+    if pv.sailine_points.is_none() {
+        // Reference point (Photoshop's crosshair circle).
+        let c = scr(t.pivot);
+        painter.circle_stroke(c, 5.0, Stroke::new(1.0, Color32::WHITE));
+        painter.circle_stroke(c, 5.0, Stroke::new(0.5, Color32::BLACK));
+        painter.line_segment([c - vec2(8.0, 0.0), c + vec2(8.0, 0.0)], Stroke::new(1.0, Color32::WHITE));
+        painter.line_segment([c - vec2(0.0, 8.0), c + vec2(0.0, 8.0)], Stroke::new(1.0, Color32::WHITE));
+    }
     if let Some(at) = painter.ctx().pointer_hover_pos().filter(|p| xf.rect.contains(*p)) {
         let p = xf.to_doc(at);
         let tol = HANDLE_PX / f64::from(xf.zoom.max(0.01));
@@ -3688,6 +3948,171 @@ mod tests {
         let b = st.doc.layer(st.active_layer.unwrap()).unwrap().surface().unwrap().content_bounds();
         assert!(b.width().abs_diff(32) <= 2 && b.x0.abs_diff(0) <= 1, "{b:?}");
         assert!(app.ui.transform.is_none() && app.transform_preview.is_none());
+    }
+
+    #[test]
+    fn sailine_transform_moves_only_selected_coordinates_and_is_one_undo_step() {
+        let mut app = PhotocraftApp::new(photocraft_engine::Session::new(), crate::Services::default());
+        app.session.execute("file.new", json!({"width": 128, "height": 128})).unwrap();
+        app.session
+            .execute("linework.create", json!({"points": [[10.0, 10.0], [30.0, 10.0], [50.0, 10.0]], "width": 8.0, "widthFactors": [0.5, 1.5, 2.0]}))
+            .unwrap();
+        let st = app.session.active().unwrap();
+        let layer = st.active_layer.unwrap();
+        let photocraft_doc::LayerContent::Linework(linework) = &st.doc.layer(layer).unwrap().content else { panic!("linework expected") };
+        let (path, ids) = (linework.paths[0].id, linework.paths[0].points.iter().map(|p| p.id).collect::<Vec<_>>());
+        app.ui.sailine_selections = ids[..2].iter().map(|point| crate::sailine_ui::Selection { document: st.doc.id, layer, path, point: *point }).collect();
+        let before_history = st.history.entries().len();
+        begin_sailine_points(&mut app, &egui::Context::default()).unwrap().unwrap();
+        let current = app.ui.transform.clone().unwrap();
+        sailine_pointer(&mut app, ToolEvent::Down { x: 20.0, y: 10.0, pressure: 1.0 }, egui::Modifiers::NONE, current);
+        let current = app.ui.transform.clone().unwrap();
+        sailine_pointer(&mut app, ToolEvent::Move { x: 25.0, y: 17.0, pressure: 1.0 }, egui::Modifiers::NONE, current);
+        let shown = crate::canvas::display_doc(&mut app, 0).0;
+        let photocraft_doc::LayerContent::Linework(shown_linework) = &shown.layer(layer).unwrap().content else { panic!("linework expected") };
+        assert_eq!(shown_linework.paths[0].points[0].position, [15.0, 17.0], "canvas preview follows the selected control point before validation");
+        assert_eq!(shown_linework.paths[0].points[1].position, [35.0, 17.0]);
+        let current = app.ui.transform.clone().unwrap();
+        sailine_pointer(&mut app, ToolEvent::Up { x: 25.0, y: 17.0 }, egui::Modifiers::NONE, current);
+        commit(&mut app);
+        let st = app.session.active().unwrap();
+        let photocraft_doc::LayerContent::Linework(linework) = &st.doc.layer(layer).unwrap().content else { panic!("linework expected") };
+        let points = &linework.paths[0].points;
+        assert_eq!(points.iter().map(|p| p.position).collect::<Vec<_>>(), vec![[15.0, 17.0], [35.0, 17.0], [50.0, 10.0]]);
+        assert_eq!(points.iter().map(|p| p.width_factor).collect::<Vec<_>>(), vec![0.5, 1.5, 2.0]);
+        assert_eq!(linework.paths[0].width, 8.0, "geometric transforms preserve nominal stroke width");
+        assert_eq!(st.history.entries().len(), before_history + 1, "preview updates coalesce to one history entry");
+        assert!(app.session.undo());
+        let st = app.session.active().unwrap();
+        let photocraft_doc::LayerContent::Linework(linework) = &st.doc.layer(layer).unwrap().content else { panic!("linework expected") };
+        assert_eq!(linework.paths[0].points.iter().map(|p| p.position).collect::<Vec<_>>(), vec![[10.0, 10.0], [30.0, 10.0], [50.0, 10.0]]);
+        assert!(app.session.redo());
+        let st = app.session.active().unwrap();
+        let photocraft_doc::LayerContent::Linework(linework) = &st.doc.layer(layer).unwrap().content else { panic!("linework expected") };
+        assert_eq!(linework.paths[0].points[1].position, [35.0, 17.0]);
+        let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos();
+        let path = std::env::temp_dir().join(format!("photocraft-sailine-transform-{}-{stamp}.pcraft", std::process::id()));
+        let path_text = path.to_string_lossy().to_string();
+        app.session.execute("file.saveACopy", json!({"path": path_text})).unwrap();
+        let mut reopened = photocraft_engine::Session::new();
+        reopened.execute("file.openAs", json!({"path": path.to_string_lossy()})).unwrap();
+        let st = reopened.active().unwrap();
+        let photocraft_doc::LayerContent::Linework(linework) = &st.doc.layer(st.active_layer.unwrap()).unwrap().content else { panic!("linework expected") };
+        assert_eq!(linework.paths[0].points[1].position, [35.0, 17.0], "saved and reopened control points retain transformed coordinates");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn ctrl_t_without_point_selection_transforms_the_active_linework_layer() {
+        let mut app = PhotocraftApp::new(photocraft_engine::Session::new(), crate::Services::default());
+        app.session.execute("file.new", json!({"width": 128, "height": 128})).unwrap();
+        app.session.execute("linework.create", json!({"points": [[10.0, 20.0], [30.0, 35.0], [50.0, 20.0]], "width": 5.0})).unwrap();
+        app.ui.tool = Tool::SaiCurve;
+        assert!(app.ui.sailine_selections.is_empty());
+
+        begin(&mut app, &egui::Context::default()).expect("Ctrl+T should start a vector transform");
+        let preview = app.transform_preview.as_ref().unwrap();
+        let sailine = preview.sailine_points.as_ref().expect("must use the point transform, not raster preview");
+        assert_eq!(sailine.selections.len(), 3, "the whole path becomes the implicit transform target");
+
+        let mut transform = app.ui.transform.clone().unwrap();
+        transform.quad = transform.quad.map(|point| [point[0] + 12.0, point[1] + 7.0]);
+        assert!(apply_sailine_quad(&mut app, &transform));
+        app.ui.transform = Some(transform);
+        commit(&mut app);
+
+        let state = app.session.active().unwrap();
+        let layer = state.doc.layer(state.active_layer.unwrap()).unwrap();
+        let LayerContent::Linework(linework) = &layer.content else { panic!("linework expected") };
+        assert_eq!(linework.paths[0].points.iter().map(|point| point.position).collect::<Vec<_>>(), vec![[22.0, 27.0], [42.0, 42.0], [62.0, 27.0]]);
+    }
+
+    #[test]
+    fn cancelling_sailine_transform_restores_points_and_history() {
+        let mut app = PhotocraftApp::new(photocraft_engine::Session::new(), crate::Services::default());
+        app.session.execute("file.new", json!({"width": 128, "height": 128})).unwrap();
+        app.session.execute("linework.create", json!({"points": [[10.0, 10.0], [30.0, 20.0]], "width": 4.0})).unwrap();
+        let st = app.session.active().unwrap();
+        let layer = st.active_layer.unwrap();
+        let photocraft_doc::LayerContent::Linework(linework) = &st.doc.layer(layer).unwrap().content else { panic!("linework expected") };
+        let selection = crate::sailine_ui::Selection { document: st.doc.id, layer, path: linework.paths[0].id, point: linework.paths[0].points[0].id };
+        app.ui.sailine_selections = vec![selection];
+        let before_history = st.history.entries().len();
+        begin_sailine_points(&mut app, &egui::Context::default()).unwrap().unwrap();
+        let mut t = app.ui.transform.clone().unwrap();
+        t.quad = t.quad.map(|p| [p[0] + 20.0, p[1] - 3.0]);
+        app.ui.transform = Some(t.clone());
+        apply_sailine_quad(&mut app, &t);
+        cancel(&mut app);
+        let st = app.session.active().unwrap();
+        let photocraft_doc::LayerContent::Linework(linework) = &st.doc.layer(layer).unwrap().content else { panic!("linework expected") };
+        assert_eq!(linework.paths[0].points[0].position, [10.0, 10.0]);
+        assert_eq!(st.history.entries().len(), before_history, "cancel removes the coalesced preview from history");
+        assert!(app.ui.transform.is_none());
+    }
+
+    #[test]
+    fn sailine_transform_scales_points_from_multiple_paths_without_scaling_strokes() {
+        let mut app = PhotocraftApp::new(photocraft_engine::Session::new(), crate::Services::default());
+        app.session.execute("file.new", json!({"width": 512, "height": 128})).unwrap();
+        app.session.execute("linework.create", json!({"points": [[10.0, 20.0], [30.0, 20.0]], "width": 8.0, "widthFactors": [0.0, 2.0]})).unwrap();
+        app.session.execute("linework.create", json!({"points": [[50.0, 20.0], [70.0, 20.0]], "width": 6.0, "widthFactors": [1.0, 1.5]})).unwrap();
+        let st = app.session.active().unwrap();
+        let layer = st.active_layer.unwrap();
+        let doc_id = st.doc.id;
+        let photocraft_doc::LayerContent::Linework(linework) = &st.doc.layer(layer).unwrap().content else { panic!("linework expected") };
+        let first = &linework.paths[0];
+        let second = &linework.paths[1];
+        app.ui.sailine_selections = vec![
+            crate::sailine_ui::Selection { document: doc_id, layer, path: first.id, point: first.points[0].id },
+            crate::sailine_ui::Selection { document: doc_id, layer, path: second.id, point: second.points[1].id },
+        ];
+        begin_sailine_points(&mut app, &egui::Context::default()).unwrap().unwrap();
+        let mut t = app.ui.transform.clone().unwrap();
+        // Fivefold horizontal stretch about the left side: x=10 remains, x=70 maps to 310.
+        t.quad = [[10.0, t.rect[1]], [310.0, t.rect[1]], [310.0, t.rect[3]], [10.0, t.rect[3]]];
+        app.ui.transform = Some(t.clone());
+        assert!(apply_sailine_quad(&mut app, &t));
+        commit(&mut app);
+        let st = app.session.active().unwrap();
+        let photocraft_doc::LayerContent::Linework(linework) = &st.doc.layer(layer).unwrap().content else { panic!("linework expected") };
+        assert_eq!(linework.paths[0].points.iter().map(|p| p.position).collect::<Vec<_>>(), vec![[10.0, 20.0], [30.0, 20.0]]);
+        assert_eq!(linework.paths[1].points.iter().map(|p| p.position).collect::<Vec<_>>(), vec![[50.0, 20.0], [310.0, 20.0]]);
+        assert_eq!(linework.paths[0].width, 8.0);
+        assert_eq!(linework.paths[1].width, 6.0);
+        assert_eq!(linework.paths[0].points.iter().map(|p| p.width_factor).collect::<Vec<_>>(), vec![0.0, 2.0]);
+        assert_eq!(linework.paths[1].points.iter().map(|p| p.width_factor).collect::<Vec<_>>(), vec![1.0, 1.5]);
+    }
+
+    #[test]
+    fn sailine_transform_rotates_control_points_without_changing_other_properties() {
+        let mut app = PhotocraftApp::new(photocraft_engine::Session::new(), crate::Services::default());
+        app.session.execute("file.new", json!({"width": 128, "height": 128})).unwrap();
+        app.session
+            .execute(
+                "linework.create",
+                json!({"points": [[10.0, 10.0], [30.0, 10.0], [30.0, 30.0], [10.0, 30.0]], "width": 7.0, "widthFactors": [0.5, 1.0, 1.5, 2.0]}),
+            )
+            .unwrap();
+        let st = app.session.active().unwrap();
+        let layer = st.active_layer.unwrap();
+        let doc_id = st.doc.id;
+        let photocraft_doc::LayerContent::Linework(linework) = &st.doc.layer(layer).unwrap().content else { panic!("linework expected") };
+        let path = &linework.paths[0];
+        app.ui.sailine_selections =
+            path.points.iter().map(|point| crate::sailine_ui::Selection { document: doc_id, layer, path: path.id, point: point.id }).collect();
+        begin_sailine_points(&mut app, &egui::Context::default()).unwrap().unwrap();
+        let mut t = app.ui.transform.clone().unwrap();
+        // A quarter-turn about (20,20), expressed as the transformed frame corners.
+        t.quad = [[30.0, 10.0], [30.0, 30.0], [10.0, 30.0], [10.0, 10.0]];
+        app.ui.transform = Some(t.clone());
+        assert!(apply_sailine_quad(&mut app, &t));
+        commit(&mut app);
+        let st = app.session.active().unwrap();
+        let photocraft_doc::LayerContent::Linework(linework) = &st.doc.layer(layer).unwrap().content else { panic!("linework expected") };
+        assert_eq!(linework.paths[0].points.iter().map(|p| p.position).collect::<Vec<_>>(), vec![[30.0, 10.0], [30.0, 30.0], [10.0, 30.0], [10.0, 10.0]]);
+        assert_eq!(linework.paths[0].width, 7.0);
+        assert_eq!(linework.paths[0].points.iter().map(|p| p.width_factor).collect::<Vec<_>>(), vec![0.5, 1.0, 1.5, 2.0]);
     }
 
     /// A commit the engine refuses (here a collapsed box; a result over the pixel budget, #3773, is

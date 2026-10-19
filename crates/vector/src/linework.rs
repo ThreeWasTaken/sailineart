@@ -93,8 +93,21 @@ pub fn interpolate_points_with_handle(points: &[[f64; 2]], handle: Option<[f64; 
 
 /// Interpolate with one of the experimental SAI parameter sets, or the unchanged Legacy model.
 pub fn interpolate_points_with_model(points: &[[f64; 2]], handle: Option<[f64; 2]>, model: InterpolationModel) -> Result<Path, String> {
+    let pointed = vec![false; points.len()];
+    interpolate_points_with_model_and_pointed(points, handle, model, &pointed)
+}
+
+pub fn interpolate_points_with_model_and_pointed(
+    points: &[[f64; 2]],
+    handle: Option<[f64; 2]>,
+    model: InterpolationModel,
+    pointed: &[bool],
+) -> Result<Path, String> {
+    if pointed.len() != points.len() {
+        return Err("linework pointed states must match point count".into());
+    }
     if model != InterpolationModel::Legacy {
-        return interpolate_sai(points, model);
+        return interpolate_sai(points, model, pointed);
     }
     if points.len() < 2 {
         return Err("linework needs at least two points".into());
@@ -135,14 +148,14 @@ pub fn interpolate_points_with_model(points: &[[f64; 2]], handle: Option<[f64; 2
             let (in_scale, out_scale) = if previous_length >= next_length { (long, short) } else { (short, long) };
             ([(next[0] - previous[0]) * 0.5, (next[1] - previous[1]) * 0.5], in_scale, out_scale)
         };
-        let in_tangent = if i == 0 || previous_coincident {
+        let in_tangent = if pointed[i] || i == 0 || previous_coincident {
             [0.0, 0.0]
         } else if i + 1 == n {
             if handle.is_none() { [point[0] - previous[0], point[1] - previous[1]] } else { [0.0, 0.0] }
         } else {
             [centered[0] * in_scale, centered[1] * in_scale]
         };
-        let out_tangent = if i + 1 == n || next_coincident {
+        let out_tangent = if pointed[i] || i + 1 == n || next_coincident {
             [0.0, 0.0]
         } else if i == 0 {
             [next[0] - point[0], next[1] - point[1]]
@@ -271,7 +284,7 @@ pub fn interpolate_points_with_model(points: &[[f64; 2]], handle: Option<[f64; 2
 /// Port of `experiments/sailine_sai126/src/main.rs::catmull`, including its two-point
 /// secant special case and coincident-anchor handling. The balance power is the experiment's
 /// β parameter; α controls chord-length parameterization.
-fn interpolate_sai(points: &[[f64; 2]], model: InterpolationModel) -> Result<Path, String> {
+fn interpolate_sai(points: &[[f64; 2]], model: InterpolationModel, pointed: &[bool]) -> Result<Path, String> {
     if points.len() < 2 {
         return Err("linework needs at least two points".into());
     }
@@ -298,6 +311,9 @@ fn interpolate_sai(points: &[[f64; 2]], model: InterpolationModel) -> Result<Pat
         let scale = ratio.max(1e-12).powf(beta);
         d[i][0] *= scale;
         d[i][1] *= scale;
+        if pointed[i] {
+            d[i] = [0.0, 0.0];
+        }
     }
     // The reference experiment sets both endpoint tangents to zero for n > 2. With
     // exactly two points it uses secants, so the segment remains straight.
@@ -319,7 +335,19 @@ fn interpolate_sai(points: &[[f64; 2]], model: InterpolationModel) -> Result<Pat
     let knots = (0..n)
         .map(|i| {
             let anchor = Point::new(points[i][0], points[i][1]);
-            let (in_ctrl, out_ctrl) = if i == 0 {
+            let (in_ctrl, out_ctrl) = if pointed[i] && i > 0 && i + 1 < n {
+                // A hard anchor has two independent one-sided tangents. Zeroing the shared
+                // tangent makes both neighboring cubics arrive and leave flat, creating a
+                // bulb or a triangular pressure outline instead of the crisp corner SAI shows.
+                // Chord-aligned handles keep each side tangent to its own segment and preserve
+                // the corner itself; reversing the point order produces the same geometry.
+                let previous = points[i - 1];
+                let next = points[i + 1];
+                (
+                    Point::new(anchor.x - (anchor.x - previous[0]) / 3.0, anchor.y - (anchor.y - previous[1]) / 3.0),
+                    Point::new(anchor.x + (next[0] - anchor.x) / 3.0, anchor.y + (next[1] - anchor.y) / 3.0),
+                )
+            } else if i == 0 {
                 (anchor, Point::new(anchor.x + d[i][0] * h[0] / 3.0, anchor.y + d[i][1] * h[0] / 3.0))
             } else if i + 1 == n {
                 (Point::new(anchor.x - d[i][0] * h[i - 1] / 3.0, anchor.y - d[i][1] * h[i - 1] / 3.0), anchor)
@@ -329,7 +357,7 @@ fn interpolate_sai(points: &[[f64; 2]], model: InterpolationModel) -> Result<Pat
                     Point::new(anchor.x + d[i][0] * h[i] / 3.0, anchor.y + d[i][1] * h[i] / 3.0),
                 )
             };
-            Knot { anchor, in_ctrl, out_ctrl, smooth: i > 0 && i + 1 < n }
+            Knot { anchor, in_ctrl, out_ctrl, smooth: i > 0 && i + 1 < n && !pointed[i] }
         })
         .collect();
     Ok(Path::new(vec![Subpath { closed: false, knots, op: PathOp::Combine }]))
@@ -349,8 +377,24 @@ pub fn variable_width_shape_with_model(
     handle: Option<[f64; 2]>,
     model: InterpolationModel,
 ) -> Result<ShapeLayer, String> {
+    let pointed = vec![false; points.len()];
+    variable_width_shape_with_model_and_pointed(points, factors, width, color, handle, model, &pointed)
+}
+
+pub fn variable_width_shape_with_model_and_pointed(
+    points: &[[f64; 2]],
+    factors: &[f32],
+    width: f64,
+    color: Color,
+    handle: Option<[f64; 2]>,
+    model: InterpolationModel,
+    pointed: &[bool],
+) -> Result<ShapeLayer, String> {
     if factors.len() != points.len() {
         return Err("linework width factors must match point count".into());
+    }
+    if pointed.len() != points.len() {
+        return Err("linework pointed states must match point count".into());
     }
     if !width.is_finite() || width <= 0.0 {
         return Err("linework width must be positive and finite".into());
@@ -401,7 +445,7 @@ pub fn variable_width_shape_with_model(
             }
         }
     }
-    let center = interpolate_points_with_model(&outline_points, handle, model)?;
+    let center = interpolate_points_with_model_and_pointed(&outline_points, handle, model, pointed)?;
     let segments = center.subpaths.first().ok_or("linework path has no subpath")?.segments();
     let mut samples = Vec::new();
     let last_visible = outline_points.windows(2).rposition(|pair| (pair[1][0] - pair[0][0]).hypot(pair[1][1] - pair[0][1]) > 1e-9);
@@ -458,13 +502,16 @@ pub fn variable_width_shape_with_model(
         if index == 0 || index + 1 == points.len() {
             continue;
         }
-        let radius = width * f64::from((factors[index] - 1.0).max(0.0)) * 0.5;
+        // Pointed changes the centerline direction at this anchor, while the stroke join
+        // remains round like an open-line cap. Union a disk with the local effective radius
+        // so the two one-sided offsets meet without a flat notch or a miter spike.
+        let radius = width * f64::from(if pointed[index] { factors[index] } else { (factors[index] - 1.0).max(0.0) }) * 0.5;
         if radius <= 0.0 {
             continue;
         }
-        let circle: Vec<(f64, f64)> = (0..24)
+        let circle: Vec<(f64, f64)> = (0..48)
             .map(|step| {
-                let angle = std::f64::consts::TAU * step as f64 / 24.0;
+                let angle = std::f64::consts::TAU * step as f64 / 48.0;
                 (point[0] + angle.cos() * radius, point[1] + angle.sin() * radius)
             })
             .collect();
@@ -525,6 +572,34 @@ mod tests {
         assert!(subpath.knots[1].smooth);
         assert!(!subpath.knots[0].smooth);
         assert!(!subpath.knots[3].smooth);
+    }
+
+    #[test]
+    fn pointed_anchor_uses_independent_chord_aligned_handles() {
+        let points = [[0.0, 0.0], [40.0, 0.0], [40.0, 40.0]];
+        let path = interpolate_points_with_model_and_pointed(&points, None, InterpolationModel::SaiSimplified, &[false, true, false]).unwrap();
+        let knots = &path.subpaths[0].knots;
+        assert_eq!(knots[1].in_ctrl, Point::new(40.0 - 40.0 / 3.0, 0.0));
+        assert_eq!(knots[1].out_ctrl, Point::new(40.0, 40.0 / 3.0));
+        assert!(!knots[1].smooth);
+
+        let reversed_points = [points[2], points[1], points[0]];
+        let reversed = interpolate_points_with_model_and_pointed(&reversed_points, None, InterpolationModel::SaiSimplified, &[false, true, false]).unwrap();
+        let reverse_knot = &reversed.subpaths[0].knots[1];
+        assert_eq!(reverse_knot.in_ctrl, knots[1].out_ctrl);
+        assert_eq!(reverse_knot.out_ctrl, knots[1].in_ctrl);
+    }
+
+    #[test]
+    fn pointed_stroke_join_has_the_same_radius_as_an_open_round_cap() {
+        let points = [[0.0, 0.0], [12.0, 12.0], [24.0, 0.0]];
+        let shape =
+            variable_width_shape_with_model_and_pointed(&points, &[1.0; 3], 3.0, Color::BLACK, None, InterpolationModel::SaiSimplified, &[false, true, false])
+                .unwrap();
+        let has_join_disk = shape.path.subpaths.iter().any(|subpath| {
+            subpath.knots.len() == 48 && subpath.knots.iter().all(|knot| ((knot.anchor.x - 12.0).hypot(knot.anchor.y - 12.0) - 1.5).abs() < 1e-9)
+        });
+        assert!(has_join_disk, "pointed join must be rounded to half the 3 px effective width");
     }
 
     #[test]

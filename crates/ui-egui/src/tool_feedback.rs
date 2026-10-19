@@ -1,5 +1,5 @@
-//! On-canvas tool feedback: the selection tools' intent badge (#170) and outlines that stay
-//! visible on any image (#172).
+//! On-canvas tool feedback: selection intent badges (#170) and outlines that stay visible on any
+//! image (#172).
 //!
 //! Photoshop marks the selection-tool cursor with a small `+` (add), `−` (subtract) or `×`
 //! (intersect) reflecting the effective mode: the options bar's mode, overridden by the held
@@ -100,6 +100,25 @@ pub fn document_selection_mode(app: &PhotocraftApp, tool: Tool, m: egui::Modifie
 /// The badge the cursor of `tool` shows with modifiers `m` (None for non-selection tools or New;
 /// the anchor point tools show theirs).
 pub fn badge(app: &PhotocraftApp, tool: Tool, m: egui::Modifiers) -> Option<Badge> {
+    // SaiLine uses the same compact add/subtract cursor cues as PhotoCraft's selection tools:
+    // Ctrl over a segment inserts (+), Alt over a point or segment deletes (−), and Shift
+    // announces additive point/box selection. Ctrl over a point moves it with the normal pointer;
+    // the hand cursor remains reserved for moving a PhotoCraft selection.
+    if crate::sailine_ui::is_sailine_tool(tool) {
+        let (over_point, over_segment) = app
+            .hover_doc
+            .map_or((false, false), |point| (crate::sailine_ui::nearest_point(app, point).is_some(), crate::sailine_ui::nearest_segment(app, point).is_some()));
+        if m.ctrl {
+            return (!over_point && over_segment).then_some(Badge::Add);
+        }
+        if m.alt && (over_point || over_segment) {
+            return Some(Badge::Subtract);
+        }
+        if m.shift {
+            return Some(Badge::Add);
+        }
+        return None;
+    }
     // Add / Delete Anchor Point: + or − beside the crosshair, as on Photoshop's pen cursors (⌥
     // swaps them; ⌘ is Direct Selection, which shows none).
     if let Some(t) = crate::anchor_tools::effective(tool, m) {
@@ -273,6 +292,25 @@ mod tests {
         assert_eq!(badge_glyph(Badge::Add, c, 3.0).len(), 2);
         assert_eq!(badge_glyph(Badge::Subtract, c, 3.0).len(), 1);
         assert!(badge_glyph(Badge::Intersect, c, 3.0).iter().all(|[a, b]| a.x != b.x && a.y != b.y));
+    }
+
+    #[test]
+    fn sailine_uses_standard_add_subtract_badges_for_edit_shortcuts() {
+        let mut app = PhotocraftApp::new(photocraft_engine::Session::new(), Default::default());
+        app.run("file.new", serde_json::json!({"width": 200, "height": 100})).unwrap();
+        app.run("linework.create", serde_json::json!({"points": [[20.0, 50.0], [180.0, 50.0]], "width": 4.0})).unwrap();
+        app.ui.tool = Tool::SaiCurve;
+
+        app.hover_doc = Some([100.0, 50.0]);
+        assert_eq!(badge(&app, Tool::SaiCurve, egui::Modifiers::CTRL), Some(Badge::Add), "Ctrl over a segment inserts a point");
+        assert_eq!(badge(&app, Tool::SaiCurve, egui::Modifiers::ALT), Some(Badge::Subtract), "Alt over a segment deletes it");
+
+        app.hover_doc = Some([20.0, 50.0]);
+        assert_eq!(badge(&app, Tool::SaiCurve, egui::Modifiers::CTRL), None, "Ctrl over a control point moves it without a badge");
+        assert_eq!(badge(&app, Tool::SaiCurve, egui::Modifiers::ALT), Some(Badge::Subtract), "Alt over a control point deletes it");
+
+        app.hover_doc = Some([190.0, 80.0]);
+        assert_eq!(badge(&app, Tool::SaiCurve, egui::Modifiers::SHIFT), Some(Badge::Add), "Shift announces additive selection dragging");
     }
 
     #[test]

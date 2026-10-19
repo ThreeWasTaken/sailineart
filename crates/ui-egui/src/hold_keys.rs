@@ -89,6 +89,11 @@ pub fn cmd_moves(t: Tool) -> bool {
                 | Tool::CurvaturePen
                 | Tool::SaiCurve
                 | Tool::SaiPressure
+                | Tool::SaiStraight
+                | Tool::SaiWeight
+                | Tool::SaiCombine
+                | Tool::SaiPointed
+                | Tool::SaiColor
                 | Tool::AddAnchorPoint
                 | Tool::DeleteAnchorPoint
                 | Tool::ConvertPoint

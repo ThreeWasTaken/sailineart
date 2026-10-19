@@ -33,6 +33,161 @@ fn creates_a_dedicated_linework_layer() {
 }
 
 #[test]
+fn recoloring_a_path_preserves_its_point_properties_and_is_undoable() {
+    let mut s = Session::new();
+    s.execute("file.new", json!({"width":96,"height":64})).unwrap();
+    let created = s.execute("linework.create", json!({"points":[[8,12],[44,28],[80,12]],"width":7,"color":"#112233","widthFactors":[0.25,1.5,2.0]})).unwrap();
+    let layer = photocraft_doc::LayerId(created["layer"].as_u64().unwrap());
+    let path = match &s.active().unwrap().doc.layer(layer).unwrap().content {
+        LayerContent::Linework(lw) => lw.paths[0].clone(),
+        _ => panic!(),
+    };
+    s.execute("linework.setPathColor", json!({"layer":layer.0,"path":path.id,"color":"#d04080"})).unwrap();
+    let colored = match &s.active().unwrap().doc.layer(layer).unwrap().content {
+        LayerContent::Linework(lw) => lw.paths[0].clone(),
+        _ => panic!(),
+    };
+    assert_eq!(colored.color.to_rgb(), [0xd0 as f32 / 255.0, 0x40 as f32 / 255.0, 0x80 as f32 / 255.0]);
+    assert_eq!(colored.points.iter().map(|p| p.width_factor).collect::<Vec<_>>(), vec![0.25, 1.5, 2.0]);
+    assert_eq!(colored.width, path.width);
+    assert_eq!(colored.points.iter().map(|p| p.position).collect::<Vec<_>>(), path.points.iter().map(|p| p.position).collect::<Vec<_>>());
+    assert!(s.undo());
+    let restored = match &s.active().unwrap().doc.layer(layer).unwrap().content {
+        LayerContent::Linework(lw) => lw.paths[0].clone(),
+        _ => panic!(),
+    };
+    assert_eq!(restored.color, path.color);
+    assert!(s.redo());
+    let bytes = save_to_bytes(&s.active().unwrap().doc, &SaveOptions::default()).unwrap();
+    let loaded = load_from_bytes(&bytes).unwrap();
+    let persisted = match &loaded.layer(layer).unwrap().content {
+        LayerContent::Linework(lw) => lw.paths[0].clone(),
+        _ => panic!(),
+    };
+    assert_eq!(persisted.color, colored.color);
+    assert_eq!(persisted.points, colored.points);
+}
+
+#[test]
+fn sai_weight_changes_only_the_base_path_width_and_is_undoable() {
+    let mut s = Session::new();
+    s.execute("file.new", json!({"width":96,"height":64})).unwrap();
+    let created = s.execute("linework.create", json!({"points":[[8,12],[44,28],[80,12]],"width":7,"widthFactors":[0.25,1.5,2.0]})).unwrap();
+    let layer = photocraft_doc::LayerId(created["layer"].as_u64().unwrap());
+    let path_id = match &s.active().unwrap().doc.layer(layer).unwrap().content {
+        LayerContent::Linework(lw) => lw.paths[0].id,
+        _ => panic!(),
+    };
+    s.execute("linework.setPathWidth", json!({"layer":layer.0,"path":path_id,"width":30.0})).unwrap();
+    let read_path = |s: &Session| match &s.active().unwrap().doc.layer(layer).unwrap().content {
+        LayerContent::Linework(lw) => lw.paths.iter().find(|p| p.id == path_id).unwrap().clone(),
+        _ => panic!(),
+    };
+    let widened = read_path(&s);
+    assert_eq!(widened.width, 30.0);
+    assert_eq!(widened.points.iter().map(|p| p.width_factor).collect::<Vec<_>>(), vec![0.25, 1.5, 2.0]);
+    assert!(s.undo());
+    assert_eq!(read_path(&s).width, 7.0);
+    assert!(s.redo());
+    assert_eq!(read_path(&s).width, 30.0);
+    assert!(s.execute("linework.setPathWidth", json!({"layer":layer.0,"path":path_id,"width":31.0})).is_err());
+}
+
+#[test]
+fn deleting_an_internal_segment_splits_the_path_and_preserves_control_points() {
+    let mut s = Session::new();
+    s.execute("file.new", json!({"width":128,"height":96})).unwrap();
+    let created = s
+        .execute(
+            "linework.create",
+            json!({"points":[[8,12],[36,20],[64,28],[92,36]],"width":6,"color":"#427ab5","widthFactors":[0.5,0.75,1.5,2.0],"straight":true}),
+        )
+        .unwrap();
+    let layer = photocraft_doc::LayerId(created["layer"].as_u64().unwrap());
+    let original = match &s.active().unwrap().doc.layer(layer).unwrap().content {
+        LayerContent::Linework(lw) => lw.paths[0].clone(),
+        _ => panic!(),
+    };
+    let split = s.execute("linework.deleteSegment", json!({"layer":layer.0,"path":original.id,"segment":1})).unwrap();
+    assert_ne!(split["newPath"], Value::Null);
+    let paths = match &s.active().unwrap().doc.layer(layer).unwrap().content {
+        LayerContent::Linework(lw) => lw.paths.clone(),
+        _ => panic!(),
+    };
+    assert_eq!(paths.len(), 2);
+    let first = paths.iter().find(|path| path.id == original.id).unwrap();
+    let second = paths.iter().find(|path| Some(path.id) == split["newPath"].as_u64()).unwrap();
+    assert_eq!(first.points, original.points[..2]);
+    assert_eq!(second.points, original.points[2..]);
+    assert_eq!(first.width, original.width);
+    assert_eq!(second.width, original.width);
+    assert_eq!(first.color, original.color);
+    assert_eq!(second.color, original.color);
+    assert!(first.points.iter().all(|point| point.pointed));
+    assert!(second.points.iter().all(|point| point.pointed));
+    assert!(s.undo());
+    let restored = match &s.active().unwrap().doc.layer(layer).unwrap().content {
+        LayerContent::Linework(lw) => lw.paths.clone(),
+        _ => panic!(),
+    };
+    assert_eq!(restored, vec![original]);
+    assert!(s.redo());
+    let redone = match &s.active().unwrap().doc.layer(layer).unwrap().content {
+        LayerContent::Linework(lw) => lw.paths.len(),
+        _ => panic!(),
+    };
+    assert_eq!(redone, 2);
+}
+
+#[test]
+fn deleting_an_end_segment_removes_its_endpoint_and_a_two_point_path() {
+    let mut s = Session::new();
+    s.execute("file.new", json!({"width":96,"height":64})).unwrap();
+    let created = s.execute("linework.create", json!({"points":[[8,12],[36,20],[64,28]],"width":4})).unwrap();
+    let layer = photocraft_doc::LayerId(created["layer"].as_u64().unwrap());
+    let (path_id, first_point) = match &s.active().unwrap().doc.layer(layer).unwrap().content {
+        LayerContent::Linework(lw) => (lw.paths[0].id, lw.paths[0].points[0].id),
+        _ => panic!(),
+    };
+    let deleted = s.execute("linework.deleteSegment", json!({"layer":layer.0,"path":path_id,"segment":0})).unwrap();
+    assert_eq!(deleted["removedPoint"].as_u64(), Some(first_point));
+    let remaining = match &s.active().unwrap().doc.layer(layer).unwrap().content {
+        LayerContent::Linework(lw) => lw.paths[0].points.len(),
+        _ => panic!(),
+    };
+    assert_eq!(remaining, 2);
+    s.execute("linework.deleteSegment", json!({"layer":layer.0,"path":path_id,"segment":0})).unwrap();
+    let paths = match &s.active().unwrap().doc.layer(layer).unwrap().content {
+        LayerContent::Linework(lw) => lw.paths.len(),
+        _ => panic!(),
+    };
+    assert_eq!(paths, 0);
+}
+
+#[test]
+fn combining_two_linework_endpoints_keeps_point_properties_and_is_undoable() {
+    let mut s = Session::new();
+    s.execute("file.new", json!({"width":96,"height":64})).unwrap();
+    let a = s.execute("linework.create", json!({"points":[[8,12],[30,20]],"width":5,"widthFactors":[0.5,1.5]})).unwrap();
+    s.execute("linework.create", json!({"points":[[30,20],[80,12]],"width":5,"widthFactors":[1.25,0.75]})).unwrap();
+    let layer = photocraft_doc::LayerId(a["layer"].as_u64().unwrap());
+    let (pa, pb, join_a, join_b) = {
+        let LayerContent::Linework(lw) = &s.active().unwrap().doc.layer(layer).unwrap().content else { panic!() };
+        let pa = lw.paths.iter().find(|p| p.id == lw.paths[0].id).unwrap();
+        let pb = lw.paths.iter().find(|p| p.id != pa.id).unwrap();
+        (pa.id, pb.id, pa.points.last().unwrap().id, pb.points.first().unwrap().id)
+    };
+    s.execute("linework.combinePaths", json!({"layer":layer.0,"pathA":pa,"pointA":join_a,"pathB":pb,"pointB":join_b})).unwrap();
+    let LayerContent::Linework(lw) = &s.active().unwrap().doc.layer(layer).unwrap().content else { panic!() };
+    assert_eq!(lw.paths.len(), 1);
+    assert_eq!(lw.paths[0].points.len(), 3);
+    assert_eq!(lw.paths[0].points.iter().map(|p| p.width_factor).collect::<Vec<_>>(), vec![0.5, 1.5, 0.75]);
+    assert!(s.undo());
+    let LayerContent::Linework(lw) = &s.active().unwrap().doc.layer(layer).unwrap().content else { panic!() };
+    assert_eq!(lw.paths.len(), 2);
+}
+
+#[test]
 fn creating_again_on_active_linework_reuses_the_same_layer() {
     let mut s = Session::new();
     s.execute("file.new", json!({"width": 128, "height": 96})).unwrap();
@@ -157,6 +312,52 @@ fn pressure_range_insert_undo_redo_and_serialization_preserve_point_values() {
     let LayerContent::Linework(loaded_linework) = &loaded.layer(layer).unwrap().content else { panic!("linework layer expected") };
     assert_eq!(loaded_linework.paths[0].points.iter().map(|point| point.width_factor).collect::<Vec<_>>(), vec![0.0, 1.25, 2.0]);
     assert!(s.execute("linework.insertPoint", json!({"layer": layer.0, "path": path, "index": 1, "x": 32, "y": 24, "factor": 2.01})).is_err());
+}
+
+#[test]
+fn batch_pressure_and_deletion_are_atomic_and_undoable() {
+    let mut s = Session::new();
+    s.execute("file.new", json!({"width": 160, "height": 100})).unwrap();
+    let first = s.execute("linework.create", json!({"points": [[10, 20], [50, 70], [90, 20]], "width": 4})).unwrap();
+    let second = s.execute("linework.create", json!({"points": [[20, 80], [80, 80]], "width": 4})).unwrap();
+    let layer = photocraft_doc::LayerId(first["layer"].as_u64().unwrap());
+    let (path_a, points_a, path_b, points_b) = match &s.active().unwrap().doc.layer(layer).unwrap().content {
+        LayerContent::Linework(linework) => (
+            linework.paths[0].id,
+            linework.paths[0].points.iter().map(|p| p.id).collect::<Vec<_>>(),
+            linework.paths[1].id,
+            linework.paths[1].points.iter().map(|p| p.id).collect::<Vec<_>>(),
+        ),
+        _ => panic!("linework layer expected"),
+    };
+    assert_eq!(first["layer"], second["layer"]);
+    let target = |path, point, factor| json!({"layer": layer.0, "path": path, "point": point, "factor": factor});
+    let width_before = s.active().unwrap().history.entries().len();
+    s.execute("linework.setPointWidths", json!({"points": [target(path_a, points_a[0], 0.5), target(path_b, points_b[1], 1.75)]})).unwrap();
+    assert_eq!(s.active().unwrap().history.entries().len(), width_before + 1);
+    let factors = |s: &Session| match &s.active().unwrap().doc.layer(layer).unwrap().content {
+        LayerContent::Linework(linework) => {
+            linework.paths.iter().map(|path| path.points.iter().map(|p| p.width_factor).collect::<Vec<_>>()).collect::<Vec<_>>()
+        }
+        _ => Vec::new(),
+    };
+    assert_eq!(factors(&s), vec![vec![0.5, 1.0, 1.0], vec![1.0, 1.75]]);
+    assert!(s.undo());
+    assert_eq!(factors(&s), vec![vec![1.0; 3], vec![1.0; 2]]);
+    assert!(s.redo());
+    let delete_before = s.active().unwrap().history.entries().len();
+    let id = |path, point| json!({"layer": layer.0, "path": path, "point": point});
+    s.execute("linework.deletePoints", json!({"points": [id(path_a, points_a[1]), id(path_b, points_b[0]), id(path_b, points_b[1])]})).unwrap();
+    assert_eq!(s.active().unwrap().history.entries().len(), delete_before + 1);
+    let LayerContent::Linework(linework) = &s.active().unwrap().doc.layer(layer).unwrap().content else { panic!("linework layer expected") };
+    assert_eq!(linework.paths.len(), 1);
+    assert_eq!(linework.paths[0].points.len(), 2);
+    assert!(s.undo());
+    assert_eq!(factors(&s), vec![vec![0.5, 1.0, 1.0], vec![1.0, 1.75]]);
+    assert!(s.redo());
+    assert!(s.execute("linework.deletePoints", json!({"points": [id(path_a, points_a[0]), id(path_a, 999999)]})).is_err());
+    let LayerContent::Linework(linework) = &s.active().unwrap().doc.layer(layer).unwrap().content else { panic!("linework layer expected") };
+    assert_eq!(linework.paths[0].points.len(), 2);
 }
 
 #[test]

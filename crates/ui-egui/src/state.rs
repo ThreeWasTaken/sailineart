@@ -123,6 +123,11 @@ pub enum Tool {
     SaiCurve,
     #[serde(alias = "SaiLineWidth")]
     SaiPressure,
+    SaiStraight,
+    SaiWeight,
+    SaiCombine,
+    SaiPointed,
+    SaiColor,
     AddAnchorPoint,
     DeleteAnchorPoint,
     /// Converts an anchor between smooth and corner, and pulls handles out of a corner
@@ -144,9 +149,8 @@ pub enum Tool {
 fn default_sailine_width() -> f32 {
     3.0
 }
-
 impl Tool {
-    pub const ALL: [Tool; 69] = [
+    pub const ALL: [Tool; 74] = [
         Tool::Move,
         Tool::Artboard,
         Tool::RectMarquee,
@@ -202,6 +206,11 @@ impl Tool {
         Tool::CurvaturePen,
         Tool::SaiCurve,
         Tool::SaiPressure,
+        Tool::SaiStraight,
+        Tool::SaiWeight,
+        Tool::SaiCombine,
+        Tool::SaiPointed,
+        Tool::SaiColor,
         Tool::AddAnchorPoint,
         Tool::DeleteAnchorPoint,
         Tool::ConvertPoint,
@@ -278,6 +287,11 @@ impl Tool {
             Tool::CurvaturePen => "Curvature Pen Tool",
             Tool::SaiCurve => "SaiCurve Tool",
             Tool::SaiPressure => "SaiPressure Tool",
+            Tool::SaiStraight => "SaiLine Tool",
+            Tool::SaiWeight => "SaiWeight Tool",
+            Tool::SaiCombine => "SaiCombine Tool",
+            Tool::SaiPointed => "SaiPointed Tool",
+            Tool::SaiColor => "SaiColor Tool",
             Tool::AddAnchorPoint => "Add Anchor Point Tool",
             Tool::DeleteAnchorPoint => "Delete Anchor Point Tool",
             Tool::ConvertPoint => "Convert Point Tool",
@@ -357,6 +371,11 @@ impl Tool {
             | Tool::CurvaturePen
             | Tool::SaiCurve
             | Tool::SaiPressure
+            | Tool::SaiStraight
+            | Tool::SaiWeight
+            | Tool::SaiCombine
+            | Tool::SaiPointed
+            | Tool::SaiColor
             | Tool::AddAnchorPoint
             | Tool::DeleteAnchorPoint
             | Tool::ConvertPoint => 'P',
@@ -392,7 +411,7 @@ impl Tool {
             return Some(Tool::SaiPressure);
         }
         if n == "sailine" {
-            return Some(Tool::SaiCurve);
+            return Some(Tool::SaiStraight);
         }
         Tool::ALL.into_iter().find(|t| {
             let a = format!("{t:?}").to_ascii_lowercase();
@@ -1171,6 +1190,10 @@ pub struct UiState {
     pub sailine_pressure_drag: Option<crate::sailine_ui::PointPressureDrag>,
     #[serde(default, skip_deserializing)]
     pub sailine_selection_box: Option<crate::sailine_ui::SelectionBox>,
+    #[serde(default, skip_deserializing)]
+    pub sailine_shared_gesture: Option<crate::sailine_ui::SharedGesture>,
+    #[serde(default, skip_deserializing)]
+    pub sailine_combine_first: Option<crate::sailine_ui::Selection>,
     #[serde(default)]
     pub stroke_editor: Option<crate::shape_stroke_ui::StrokeEditor>,
     /// Direct Selection tool: selected anchors and the drag in progress (#790).
@@ -1356,6 +1379,8 @@ impl Default for UiState {
             sailine_point_drag: None,
             sailine_pressure_drag: None,
             sailine_selection_box: None,
+            sailine_shared_gesture: None,
+            sailine_combine_first: None,
             stroke_editor: None,
             direct_selection: Default::default(),
             selected_path: None,
@@ -1463,12 +1488,16 @@ mod tests {
         assert_eq!(Tool::from_name("patternStamp"), Some(Tool::PatternStamp));
         assert_eq!(Tool::from_name("Pattern Stamp Tool"), Some(Tool::PatternStamp));
         assert_eq!(Tool::from_name("SaiLineWidth"), Some(Tool::SaiPressure));
-        assert_eq!(Tool::from_name("SaiLine"), Some(Tool::SaiCurve));
+        assert_eq!(Tool::from_name("SaiLine"), Some(Tool::SaiStraight));
         assert_eq!(Tool::from_name("SaiCurve"), Some(Tool::SaiCurve));
         assert_eq!(Tool::from_name("SaiPressure"), Some(Tool::SaiPressure));
+        for tool in [Tool::SaiCurve, Tool::SaiPressure, Tool::SaiStraight, Tool::SaiWeight, Tool::SaiCombine, Tool::SaiPointed, Tool::SaiColor] {
+            assert!(Tool::ALL.contains(&tool));
+            assert!(crate::sailine_ui::is_sailine_tool(tool));
+        }
         assert_eq!(serde_json::from_str::<Tool>("\"SaiLineWidth\"").unwrap(), Tool::SaiPressure);
         assert_eq!(serde_json::from_str::<Tool>("\"SaiLine\"").unwrap(), Tool::SaiCurve);
-        assert_eq!(Tool::ALL.len(), 69);
+        assert_eq!(Tool::ALL.len(), 74);
         assert_eq!(Tool::from_name("Vertical Type Mask Tool"), Some(Tool::VerticalTypeMask));
         assert_eq!(Tool::from_name("addAnchorPoint"), Some(Tool::AddAnchorPoint));
         assert_eq!(Tool::from_name("Delete Anchor Point Tool"), Some(Tool::DeleteAnchorPoint));

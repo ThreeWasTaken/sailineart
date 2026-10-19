@@ -16,11 +16,19 @@ const CMD: &str = "linework.create";
 const MOVE_CMD: &str = "linework.movePoint";
 const MOVE_MANY_CMD: &str = "linework.movePoints";
 const DELETE_CMD: &str = "linework.deletePoint";
+const DELETE_MANY_CMD: &str = "linework.deletePoints";
+const DELETE_SEGMENT_CMD: &str = "linework.deleteSegment";
 const INSERT_CMD: &str = "linework.insertPoint";
 const WIDTH_CMD: &str = "linework.setPointWidth";
+const PATH_WIDTH_CMD: &str = "linework.setPathWidth";
+const WIDTH_MANY_CMD: &str = "linework.setPointWidths";
 const COLOR_CMD: &str = "linework.setPathColor";
+const POINTED_CMD: &str = "linework.setPointPointed";
+const COMBINE_CMD: &str = "linework.combinePaths";
 const INTERPOLATION_CMD: &str = "linework.setInterpolation";
 const MAX_POINTS: usize = 4096;
+
+type PointTarget = (photocraft_doc::LayerId, u64, u64, Option<f32>);
 
 fn has_doc(s: &Session) -> std::result::Result<(), String> {
     s.active().map(|_| ()).ok_or_else(|| "no document open".into())
@@ -126,8 +134,9 @@ fn render_shape(
     width: f32,
     handle: Option<[f64; 2]>,
     model: vector::linework::InterpolationModel,
+    pointed: &[bool],
 ) -> Result<ShapeLayer> {
-    vector::linework::variable_width_shape_with_model(points, factors, f64::from(width), color, handle, model).map_err(EngineError::Other)
+    vector::linework::variable_width_shape_with_model_and_pointed(points, factors, f64::from(width), color, handle, model, pointed).map_err(EngineError::Other)
 }
 
 fn composite_cache(rect: photocraft_geom::Rect, base: Option<Surface>, overlay: Surface) -> Surface {
@@ -192,7 +201,8 @@ fn refresh_linework_cache(
         }
         let points: Vec<[f64; 2]> = path.points.iter().map(|point| point.position).collect();
         let factors: Vec<f32> = path.points.iter().map(|point| point.width_factor).collect();
-        let mut shape = render_shape(&points, &factors, path.color, path.width, path.handle, model)?;
+        let pointed: Vec<bool> = path.points.iter().map(|point| point.pointed).collect();
+        let mut shape = render_shape(&points, &factors, path.color, path.width, path.handle, model, &pointed)?;
         crate::vector_cmds::refresh_shape(doc, &mut shape);
         let rendered = shape.cache.ok_or(EngineError::Other("linework render cache missing".into()))?;
         if changed.contains(&path.id) {
@@ -229,7 +239,8 @@ fn create(s: &mut Session, p: &Value) -> Result<Value> {
     let model = interpolation(p, CMD)?;
     let points = points(p)?;
     let live_handle = handle(p)?;
-    let path = vector::linework::interpolate_points_with_model(&points, live_handle, model)
+    let pointed = vec![p.get("straight").and_then(Value::as_bool).unwrap_or(false); points.len()];
+    let path = vector::linework::interpolate_points_with_model_and_pointed(&points, live_handle, model, &pointed)
         .map_err(|message| EngineError::BadParams { cmd: CMD.into(), msg: message })?;
     let color = solid_color(s, p)?;
     let stroke_width = width(p)?;
@@ -238,8 +249,11 @@ fn create(s: &mut Session, p: &Value) -> Result<Value> {
     for (point, factor) in line.points.iter_mut().zip(factors.iter().copied()) {
         point.width_factor = factor;
     }
+    for (point, value) in line.points.iter_mut().zip(pointed.iter().copied()) {
+        point.pointed = value;
+    }
     line.handle = live_handle;
-    let mut shape = render_shape(&points, &factors, color, stroke_width, live_handle, model)
+    let mut shape = render_shape(&points, &factors, color, stroke_width, live_handle, model, &pointed)
         .map_err(|error| EngineError::BadParams { cmd: CMD.into(), msg: error.to_string() })?;
     let requested_name = p.get("name").and_then(Value::as_str).map(str::to_string);
     let id = s.edit("New Linework Path", |doc, active| {
@@ -385,6 +399,164 @@ fn delete_point(s: &mut Session, p: &Value) -> Result<Value> {
     Ok(json!({"layer": layer.0, "path": path_id, "point": point_id}))
 }
 
+fn point_targets(p: &Value, cmd: &str, with_factor: bool) -> Result<Vec<PointTarget>> {
+    let values =
+        p.get("points").and_then(Value::as_array).ok_or_else(|| EngineError::BadParams { cmd: cmd.into(), msg: "`points` must be an array".into() })?;
+    if values.is_empty() || values.len() > MAX_POINTS {
+        return Err(EngineError::BadParams { cmd: cmd.into(), msg: "`points` must contain 1..4096 points".into() });
+    }
+    let mut targets = Vec::with_capacity(values.len());
+    for value in values {
+        let required = |key: &str| {
+            value.get(key).and_then(Value::as_u64).ok_or_else(|| EngineError::BadParams { cmd: cmd.into(), msg: format!("point `{key}` is required") })
+        };
+        let layer = photocraft_doc::LayerId(required("layer")?);
+        let path = required("path")?;
+        let point = required("point")?;
+        let factor = if with_factor {
+            let factor = value
+                .get("factor")
+                .and_then(Value::as_f64)
+                .ok_or_else(|| EngineError::BadParams { cmd: cmd.into(), msg: "point `factor` is required".into() })?;
+            if !factor.is_finite() || !(0.0..=2.0).contains(&factor) {
+                return Err(EngineError::BadParams { cmd: cmd.into(), msg: "point `factor` must be between 0 and 2".into() });
+            }
+            Some(factor as f32)
+        } else {
+            None
+        };
+        if targets.iter().any(|(l, p, id, _)| (*l, *p, *id) == (layer, path, point)) {
+            return Err(EngineError::BadParams { cmd: cmd.into(), msg: "duplicate point".into() });
+        }
+        targets.push((layer, path, point, factor));
+    }
+    Ok(targets)
+}
+
+fn delete_points(s: &mut Session, p: &Value) -> Result<Value> {
+    let model = interpolation(p, DELETE_MANY_CMD)?;
+    let targets = point_targets(p, DELETE_MANY_CMD, false)?;
+    s.edit("Delete Linework Points", |doc, _| {
+        let mut changed: std::collections::BTreeMap<photocraft_doc::LayerId, Vec<u64>> = Default::default();
+        // Validate every target before mutating anything, including across paths and layers.
+        for (layer_id, path_id, point_id, _) in &targets {
+            let layer = doc.layer(*layer_id).ok_or(EngineError::NoLayer(*layer_id))?;
+            let LayerContent::Linework(linework) = &layer.content else { return Err(EngineError::Other("layer is not Linework".into())) };
+            let path = linework.paths.iter().find(|path| path.id == *path_id).ok_or_else(|| EngineError::Other("linework path not found".into()))?;
+            if !path.points.iter().any(|point| point.id == *point_id) {
+                return Err(EngineError::Other("linework point not found".into()));
+            }
+        }
+        for (layer_id, path_id, point_id, _) in &targets {
+            let layer = doc.layer_mut(*layer_id).ok_or(EngineError::NoLayer(*layer_id))?;
+            let LayerContent::Linework(linework) = &mut layer.content else { return Err(EngineError::Other("layer is not Linework".into())) };
+            let path = linework.paths.iter_mut().find(|path| path.id == *path_id).ok_or_else(|| EngineError::Other("linework path not found".into()))?;
+            path.points.retain(|point| point.id != *point_id);
+            let ids = changed.entry(*layer_id).or_default();
+            if !ids.contains(path_id) {
+                ids.push(*path_id);
+            }
+        }
+        for (layer_id, paths) in changed {
+            if let LayerContent::Linework(linework) = &mut doc.layer_mut(layer_id).ok_or(EngineError::NoLayer(layer_id))?.content {
+                linework.paths.retain(|path| path.points.len() >= 2);
+            }
+            refresh_linework_cache(doc, layer_id, &paths, model)?;
+        }
+        Ok(())
+    })?;
+    Ok(json!({"count": targets.len()}))
+}
+
+fn delete_segment(s: &mut Session, p: &Value) -> Result<Value> {
+    let model = interpolation(p, DELETE_SEGMENT_CMD)?;
+    let layer = photocraft_doc::LayerId(
+        p.get("layer").and_then(Value::as_u64).ok_or_else(|| EngineError::BadParams { cmd: DELETE_SEGMENT_CMD.into(), msg: "`layer` is required".into() })?,
+    );
+    let path_id =
+        p.get("path").and_then(Value::as_u64).ok_or_else(|| EngineError::BadParams { cmd: DELETE_SEGMENT_CMD.into(), msg: "`path` is required".into() })?;
+    let segment = p
+        .get("segment")
+        .and_then(Value::as_u64)
+        .and_then(|value| usize::try_from(value).ok())
+        .ok_or_else(|| EngineError::BadParams { cmd: DELETE_SEGMENT_CMD.into(), msg: "`segment` is required".into() })?;
+    let result = s.edit("Delete Linework Segment", |doc, _| {
+        let (new_path, removed_point, removed_path, moved_points) = {
+            let LayerContent::Linework(linework) = &mut doc.layer_mut(layer).ok_or(EngineError::NoLayer(layer))?.content else {
+                return Err(EngineError::Other("layer is not Linework".into()));
+            };
+            let path_index = linework.paths.iter().position(|path| path.id == path_id).ok_or_else(|| EngineError::Other("linework path not found".into()))?;
+            let original = linework.paths[path_index].clone();
+            if original.closed {
+                return Err(EngineError::Other("segment deletion is currently supported on open Linework paths".into()));
+            }
+            if segment + 1 >= original.points.len() {
+                return Err(EngineError::BadParams { cmd: DELETE_SEGMENT_CMD.into(), msg: "segment index is out of range".into() });
+            }
+            let count = original.points.len();
+            if count == 2 {
+                linework.paths.remove(path_index);
+                (None, None, true, Vec::new())
+            } else if segment == 0 || segment + 1 == count - 1 {
+                let remove_index = if segment == 0 { 0 } else { count - 1 };
+                let removed = original.points[remove_index].id;
+                let path = &mut linework.paths[path_index];
+                path.points.remove(remove_index);
+                (None, Some(removed), false, Vec::new())
+            } else {
+                let mut tail = linework.paths[path_index].points.split_off(segment + 1);
+                let moved: Vec<u64> = tail.iter().map(|point| point.id).collect();
+                let mut second =
+                    LineworkPath::new(tail.iter().map(|point| point.position).collect(), original.color, original.width).map_err(EngineError::Other)?;
+                second.points = std::mem::take(&mut tail);
+                second.handle = original.handle;
+                second.closed = false;
+                linework.paths[path_index].handle = None;
+                let new_path = second.id;
+                linework.paths.push(second);
+                (Some(new_path), None, false, moved)
+            }
+        };
+        refresh_linework_cache(doc, layer, &[path_id], model)?;
+        Ok((new_path, removed_point, removed_path, moved_points))
+    })?;
+    let moved: Vec<Value> = result.3.iter().copied().map(Value::from).collect();
+    Ok(json!({"layer":layer.0,"path":path_id,"newPath":result.0,"removedPoint":result.1,"removedPath":result.2,"movedPoints":moved}))
+}
+
+fn set_point_widths(s: &mut Session, p: &Value) -> Result<Value> {
+    let model = interpolation(p, WIDTH_MANY_CMD)?;
+    let targets = point_targets(p, WIDTH_MANY_CMD, true)?;
+    s.edit("Set Linework Point Widths", |doc, _| {
+        let mut changed: std::collections::BTreeMap<photocraft_doc::LayerId, Vec<u64>> = Default::default();
+        for (layer_id, path_id, point_id, _) in &targets {
+            let layer = doc.layer(*layer_id).ok_or(EngineError::NoLayer(*layer_id))?;
+            let LayerContent::Linework(linework) = &layer.content else { return Err(EngineError::Other("layer is not Linework".into())) };
+            let path = linework.paths.iter().find(|path| path.id == *path_id).ok_or_else(|| EngineError::Other("linework path not found".into()))?;
+            if !path.points.iter().any(|point| point.id == *point_id) {
+                return Err(EngineError::Other("linework point not found".into()));
+            }
+        }
+        for (layer_id, path_id, point_id, factor) in &targets {
+            let factor = factor.ok_or_else(|| EngineError::BadParams { cmd: WIDTH_MANY_CMD.into(), msg: "point `factor` is required".into() })?;
+            let layer = doc.layer_mut(*layer_id).ok_or(EngineError::NoLayer(*layer_id))?;
+            let LayerContent::Linework(linework) = &mut layer.content else { return Err(EngineError::Other("layer is not Linework".into())) };
+            let path = linework.paths.iter_mut().find(|path| path.id == *path_id).ok_or_else(|| EngineError::Other("linework path not found".into()))?;
+            let point = path.points.iter_mut().find(|point| point.id == *point_id).ok_or_else(|| EngineError::Other("linework point not found".into()))?;
+            point.width_factor = factor;
+            let ids = changed.entry(*layer_id).or_default();
+            if !ids.contains(path_id) {
+                ids.push(*path_id);
+            }
+        }
+        for (layer, paths) in changed {
+            refresh_linework_cache(doc, layer, &paths, model)?;
+        }
+        Ok(())
+    })?;
+    Ok(json!({"count": targets.len()}))
+}
+
 fn insert_point(s: &mut Session, p: &Value) -> Result<Value> {
     let model = interpolation(p, INSERT_CMD)?;
     let width_factor = inserted_width_factor(p)?;
@@ -410,6 +582,7 @@ fn insert_point(s: &mut Session, p: &Value) -> Result<Value> {
             }
             let mut point = photocraft_doc::LineworkPoint::new([x, y]).map_err(EngineError::Other)?;
             point.width_factor = width_factor;
+            point.pointed = index > 0 && index < path.points.len() && path.points[index - 1].pointed && path.points[index].pointed;
             let id = point.id;
             path.points.insert(index, point);
             id
@@ -469,6 +642,116 @@ fn set_path_color(s: &mut Session, p: &Value) -> Result<Value> {
     })?;
     let rgb = color.to_rgb();
     Ok(json!({"layer": layer.0, "path": path_id, "color": [rgb[0], rgb[1], rgb[2], color.alpha]}))
+}
+
+fn set_path_width(s: &mut Session, p: &Value) -> Result<Value> {
+    let model = interpolation(p, PATH_WIDTH_CMD)?;
+    let layer = photocraft_doc::LayerId(
+        p.get("layer").and_then(Value::as_u64).ok_or_else(|| EngineError::BadParams { cmd: PATH_WIDTH_CMD.into(), msg: "`layer` is required".into() })?,
+    );
+    let path_id =
+        p.get("path").and_then(Value::as_u64).ok_or_else(|| EngineError::BadParams { cmd: PATH_WIDTH_CMD.into(), msg: "`path` is required".into() })?;
+    let width =
+        p.get("width").and_then(Value::as_f64).ok_or_else(|| EngineError::BadParams { cmd: PATH_WIDTH_CMD.into(), msg: "`width` is required".into() })?;
+    if !width.is_finite() || !(0.7..=30.0).contains(&width) {
+        return Err(EngineError::BadParams { cmd: PATH_WIDTH_CMD.into(), msg: "`width` must be between 0.7 and 30 px".into() });
+    }
+    s.edit("Set Linework Path Width", |doc, _| {
+        {
+            let photocraft_doc::LayerContent::Linework(linework) = &mut doc.layer_mut(layer).ok_or(EngineError::NoLayer(layer))?.content else {
+                return Err(EngineError::Other("layer is not Linework".into()));
+            };
+            let path = linework.paths.iter_mut().find(|path| path.id == path_id).ok_or_else(|| EngineError::Other("linework path not found".into()))?;
+            path.width = width as f32;
+        }
+        refresh_linework_cache(doc, layer, &[path_id], model)?;
+        Ok(())
+    })?;
+    Ok(json!({"layer": layer.0, "path": path_id, "width": width}))
+}
+
+fn set_point_pointed(s: &mut Session, p: &Value) -> Result<Value> {
+    let model = interpolation(p, POINTED_CMD)?;
+    let layer = photocraft_doc::LayerId(
+        p.get("layer").and_then(Value::as_u64).ok_or_else(|| EngineError::BadParams { cmd: POINTED_CMD.into(), msg: "`layer` is required".into() })?,
+    );
+    let path_id = p.get("path").and_then(Value::as_u64).ok_or_else(|| EngineError::BadParams { cmd: POINTED_CMD.into(), msg: "`path` is required".into() })?;
+    let point_id =
+        p.get("point").and_then(Value::as_u64).ok_or_else(|| EngineError::BadParams { cmd: POINTED_CMD.into(), msg: "`point` is required".into() })?;
+    s.edit("Set Linework Point Type", |doc, _| {
+        let pointed = {
+            let photocraft_doc::LayerContent::Linework(linework) = &mut doc.layer_mut(layer).ok_or(EngineError::NoLayer(layer))?.content else {
+                return Err(EngineError::Other("layer is not Linework".into()));
+            };
+            let path = linework.paths.iter_mut().find(|path| path.id == path_id).ok_or_else(|| EngineError::Other("linework path not found".into()))?;
+            let point = path.points.iter_mut().find(|point| point.id == point_id).ok_or_else(|| EngineError::Other("linework point not found".into()))?;
+            point.pointed = p.get("pointed").and_then(Value::as_bool).unwrap_or(!point.pointed);
+            point.pointed
+        };
+        refresh_linework_cache(doc, layer, &[path_id], model)?;
+        Ok(pointed)
+    })?;
+    let pointed = s
+        .active()
+        .and_then(|st| st.doc.layer(layer))
+        .and_then(|layer| match &layer.content {
+            LayerContent::Linework(linework) => {
+                linework.paths.iter().find(|path| path.id == path_id)?.points.iter().find(|point| point.id == point_id).map(|point| point.pointed)
+            }
+            _ => None,
+        })
+        .unwrap_or(false);
+    Ok(json!({"layer": layer.0, "path": path_id, "point": point_id, "pointed": pointed}))
+}
+
+fn combine_paths(s: &mut Session, p: &Value) -> Result<Value> {
+    let model = interpolation(p, COMBINE_CMD)?;
+    let layer = photocraft_doc::LayerId(
+        p.get("layer").and_then(Value::as_u64).ok_or_else(|| EngineError::BadParams { cmd: COMBINE_CMD.into(), msg: "`layer` required".into() })?,
+    );
+    let path_a = p.get("pathA").and_then(Value::as_u64).ok_or_else(|| EngineError::BadParams { cmd: COMBINE_CMD.into(), msg: "`pathA` required".into() })?;
+    let point_a = p.get("pointA").and_then(Value::as_u64).ok_or_else(|| EngineError::BadParams { cmd: COMBINE_CMD.into(), msg: "`pointA` required".into() })?;
+    let path_b = p.get("pathB").and_then(Value::as_u64).ok_or_else(|| EngineError::BadParams { cmd: COMBINE_CMD.into(), msg: "`pathB` required".into() })?;
+    let point_b = p.get("pointB").and_then(Value::as_u64).ok_or_else(|| EngineError::BadParams { cmd: COMBINE_CMD.into(), msg: "`pointB` required".into() })?;
+    if path_a == path_b {
+        return Err(EngineError::BadParams { cmd: COMBINE_CMD.into(), msg: "choose endpoints from two different paths".into() });
+    }
+    s.edit("Combine Linework Paths", |doc, _| {
+        {
+            let LayerContent::Linework(lw) = &mut doc.layer_mut(layer).ok_or(EngineError::NoLayer(layer))?.content else {
+                return Err(EngineError::Other("layer is not Linework".into()));
+            };
+            let ia = lw.paths.iter().position(|p| p.id == path_a).ok_or_else(|| EngineError::Other("first path not found".into()))?;
+            let ib = lw.paths.iter().position(|p| p.id == path_b).ok_or_else(|| EngineError::Other("second path not found".into()))?;
+            let mut a = lw.paths[ia].clone();
+            let mut b = lw.paths[ib].clone();
+            let ea = a.points.iter().position(|p| p.id == point_a).ok_or_else(|| EngineError::Other("first endpoint not found".into()))?;
+            let eb = b.points.iter().position(|p| p.id == point_b).ok_or_else(|| EngineError::Other("second endpoint not found".into()))?;
+            if ea != 0 && ea + 1 != a.points.len() || eb != 0 && eb + 1 != b.points.len() {
+                return Err(EngineError::BadParams { cmd: COMBINE_CMD.into(), msg: "combine requires path endpoints".into() });
+            }
+            if ea == 0 {
+                a.points.reverse();
+            }
+            if eb + 1 == b.points.len() {
+                b.points.reverse();
+            }
+            let same = (a.points.last().unwrap().position[0] - b.points.first().unwrap().position[0])
+                .hypot(a.points.last().unwrap().position[1] - b.points.first().unwrap().position[1])
+                < 1e-6;
+            if same {
+                b.points.remove(0);
+            }
+            a.points.extend(b.points);
+            a.handle = None;
+            lw.paths.retain(|p| p.id != path_b);
+            let ai = lw.paths.iter().position(|p| p.id == path_a).unwrap();
+            lw.paths[ai] = a;
+        }
+        refresh_linework_cache(doc, layer, &[path_a, path_b], model)?;
+        Ok(())
+    })?;
+    Ok(json!({"layer":layer.0,"path":path_a,"removedPath":path_b}))
 }
 
 /// Rebuild ephemeral Linework raster caches for a UI-selected model. This is deliberately not an
@@ -554,6 +837,26 @@ pub fn specs() -> Vec<CommandSpec> {
             journal: true,
         },
         CommandSpec {
+            id: DELETE_MANY_CMD,
+            label: "Delete Linework Points",
+            menu: &[],
+            shortcut: None,
+            params: r##"{"points":[{"layer":id,"path":id,"point":id}…],"interpolation":"legacy"|"saiSimplified"|"saiOptimized"?} → {count}"##,
+            enabled: has_doc,
+            run: delete_points,
+            journal: true,
+        },
+        CommandSpec {
+            id: DELETE_SEGMENT_CMD,
+            label: "Delete Linework Segment",
+            menu: &[],
+            shortcut: None,
+            params: r##"{"layer":id,"path":id,"segment":zero_based_index,"interpolation":"legacy"|"saiSimplified"|"saiOptimized"?} → {layer,path,newPath,removedPoint,removedPath,movedPoints}"##,
+            enabled: has_doc,
+            run: delete_segment,
+            journal: true,
+        },
+        CommandSpec {
             id: INSERT_CMD,
             label: "Insert Linework Point",
             menu: &[],
@@ -574,6 +877,16 @@ pub fn specs() -> Vec<CommandSpec> {
             journal: true,
         },
         CommandSpec {
+            id: WIDTH_MANY_CMD,
+            label: "Set Linework Point Widths",
+            menu: &[],
+            shortcut: None,
+            params: r##"{"points":[{"layer":id,"path":id,"point":id,"factor":0..2}…],"interpolation":"legacy"|"saiSimplified"|"saiOptimized"?} → {count}"##,
+            enabled: has_doc,
+            run: set_point_widths,
+            journal: true,
+        },
+        CommandSpec {
             id: COLOR_CMD,
             label: "Set Linework Path Color",
             menu: &[],
@@ -581,6 +894,36 @@ pub fn specs() -> Vec<CommandSpec> {
             params: r##"{"layer":id,"path":id,"color":"#rrggbb"|"#rrggbbaa"|[r,g,b,a],"interpolation":"legacy"|"saiSimplified"|"saiOptimized"?} → {layer,path,color}"##,
             enabled: has_doc,
             run: set_path_color,
+            journal: true,
+        },
+        CommandSpec {
+            id: PATH_WIDTH_CMD,
+            label: "Set Linework Path Width",
+            menu: &[],
+            shortcut: None,
+            params: r##"{"layer":id,"path":id,"width":0.7..30,"interpolation":"legacy"|"saiSimplified"|"saiOptimized"?} → {layer,path,width}"##,
+            enabled: has_doc,
+            run: set_path_width,
+            journal: true,
+        },
+        CommandSpec {
+            id: POINTED_CMD,
+            label: "Set Linework Point Type",
+            menu: &[],
+            shortcut: None,
+            params: r##"{"layer":id,"path":id,"point":id,"pointed":bool?} → {layer,path,point,pointed}"##,
+            enabled: has_doc,
+            run: set_point_pointed,
+            journal: true,
+        },
+        CommandSpec {
+            id: COMBINE_CMD,
+            label: "Combine Linework Paths",
+            menu: &[],
+            shortcut: None,
+            params: "{layer,pathA,pointA,pathB,pointB} → {layer,path,removedPath}",
+            enabled: has_doc,
+            run: combine_paths,
             journal: true,
         },
     ]

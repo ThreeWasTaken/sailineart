@@ -1136,6 +1136,12 @@ pub(crate) fn display_doc(app: &mut PhotocraftApp, idx: usize) -> (std::sync::Ar
         && app.session.active_index() == Some(idx)
         && st.doc.layer(photocraft_doc::LayerId(t.layer)).is_some()
     {
+        // SaiLine transforms update the selected control points in the live document on every
+        // drag preview. Unlike raster transforms, they do not have a separately warped texture;
+        // displaying `pv.doc` here would keep the canvas frozen at the transform's start state.
+        if crate::transform_tool::is_sailine_points_preview(pv) {
+            return (st.doc.clone(), 0);
+        }
         return (pv.doc.clone(), (1 << 40) + pv.session);
     }
     // Layer Style dialog: show its effects live (Cancel just drops the preview).
@@ -3353,9 +3359,20 @@ pub fn canvas_view(app: &mut PhotocraftApp, ui: &mut egui::Ui, idx: usize, rect:
         {
             crate::canvas_tool_menu::open_transform(app, &ctx, [p.x, p.y]);
         }
+        let sailine_modifier_right_click = response.secondary_clicked()
+            && crate::sailine_ui::modifier_right_click_deselects(
+                tool,
+                mods,
+                transforming,
+                !app.ui.sailine_selections.is_empty() || app.ui.sailine_selection.is_some(),
+            );
+        if sailine_modifier_right_click {
+            crate::sailine_ui::clear_selection(app);
+            ctx.request_repaint();
+        }
         // SaiCurve follows the same finish gesture as Enter: a secondary click commits the draft
         // instead of opening a contextual menu.
-        let sailine_finished = response.secondary_clicked() && tool == Tool::SaiCurve;
+        let sailine_finished = response.secondary_clicked() && !sailine_modifier_right_click && matches!(tool, Tool::SaiCurve | Tool::SaiStraight);
         if response.secondary_clicked() && tool == Tool::SaiPressure {
             app.ui.sailine_pressure_drag = None;
             app.ui.sailine_selection = None;
@@ -3897,18 +3914,21 @@ pub fn canvas_view(app: &mut PhotocraftApp, ui: &mut egui::Ui, idx: usize, rect:
                 | Tool::CurvaturePen
                 | Tool::SaiCurve
                 | Tool::SaiPressure
+                | Tool::SaiStraight
+                | Tool::SaiWeight
+                | Tool::SaiCombine
+                | Tool::SaiPointed
+                | Tool::SaiColor
                 | Tool::AddAnchorPoint
                 | Tool::DeleteAnchorPoint
                 | Tool::ConvertPoint => {
                     if precise_other_cursor(app) {
                         egui::CursorIcon::Crosshair
+                    } else if crate::sailine_ui::is_sailine_tool(tool) {
+                        crate::icons::cursor_tool_badge(ui.ctx(), crate::icons::tool_icon(tool), p);
+                        egui::CursorIcon::Default
                     } else {
-                        if matches!(tool, Tool::SaiCurve | Tool::SaiPressure) {
-                            crate::icons::cursor_tool_badge(ui.ctx(), crate::icons::tool_icon(tool), p);
-                            egui::CursorIcon::Default
-                        } else {
-                            pen_cursor(ui.ctx(), tool, p)
-                        }
+                        pen_cursor(ui.ctx(), tool, p)
                     }
                 }
                 // Preferences › Cursors › Other Cursors: Precise shows a crosshair for every tool.
@@ -4925,6 +4945,11 @@ pub fn tool_event(app: &mut PhotocraftApp, ev: ToolEvent, mods: egui::Modifiers)
     }
     // Window › Modifier Keys: sticky Shift/⌘/⌥ act as held keys.
     let mods = crate::workspace_ui::sticky_mods(app, mods);
+    // SaiLine point edits are tool-independent and take priority over each tool's click action.
+    // Ctrl+T remains owned by the transform tool above this shared pointer handler.
+    if crate::sailine_ui::shared_pointer(app, ev, mods) {
+        return;
+    }
     // ⌘⌥⌃-click with any tool selects the topmost layer with pixels there (quick_pick.rs); it
     // must run before the ⌃⌥ brush resize below, which the same keys would trigger.
     if crate::quick_pick::pointer(app, ev, mods) {
@@ -5165,25 +5190,24 @@ pub fn tool_event(app: &mut PhotocraftApp, ev: ToolEvent, mods: egui::Modifiers)
                     return;
                 }
                 Tool::SaiCurve => {
-                    if mods.ctrl {
-                        crate::sailine_ui::begin_drag(app, [x, y]);
-                    } else if mods.shift && crate::sailine_ui::begin_selection_box(app, [x, y]) {
+                    if mods.ctrl || mods.alt {
                         return;
-                    } else {
-                        crate::sailine_ui::down_with_mods(app, [x, y], mods);
                     }
+                    crate::sailine_ui::tool_down(app, [x, y], mods);
                     return;
                 }
                 Tool::SaiPressure => {
-                    if mods.ctrl {
-                        crate::sailine_ui::begin_drag(app, [x, y]);
-                    } else if mods.shift && crate::sailine_ui::begin_selection_box(app, [x, y]) {
+                    if mods.ctrl || mods.alt {
                         return;
-                    } else if mods.shift || mods.alt {
-                        crate::sailine_ui::down_with_mods(app, [x, y], mods);
-                    } else {
-                        crate::sailine_ui::begin_pressure_drag(app, [x, y]);
                     }
+                    crate::sailine_ui::tool_down(app, [x, y], mods);
+                    return;
+                }
+                Tool::SaiStraight | Tool::SaiWeight | Tool::SaiCombine | Tool::SaiPointed | Tool::SaiColor => {
+                    if mods.ctrl || mods.alt {
+                        return;
+                    }
+                    crate::sailine_ui::tool_down(app, [x, y], mods);
                     return;
                 }
                 Tool::CurvaturePen => {
@@ -5268,7 +5292,7 @@ pub fn tool_event(app: &mut PhotocraftApp, ev: ToolEvent, mods: egui::Modifiers)
             if tool == Tool::SaiPressure && crate::sailine_ui::pressure_drag_to(app, [x, y]) {
                 return;
             }
-            if tool == Tool::SaiCurve && crate::sailine_ui::selection_box_to(app, [x, y]) {
+            if crate::sailine_ui::is_sailine_tool(tool) && crate::sailine_ui::selection_box_to(app, [x, y]) {
                 return;
             }
             // Polygonal Lasso: ⌥ held while the button is down draws freehand into the polygon;
@@ -5292,7 +5316,7 @@ pub fn tool_event(app: &mut PhotocraftApp, ev: ToolEvent, mods: egui::Modifiers)
                 crate::sailine_ui::end_drag(app);
                 return;
             }
-            if tool == Tool::SaiCurve && crate::sailine_ui::end_selection_box(app, [x, y]) {
+            if crate::sailine_ui::is_sailine_tool(tool) && crate::sailine_ui::end_selection_box(app, [x, y]) {
                 return;
             }
             if tool.is_type()

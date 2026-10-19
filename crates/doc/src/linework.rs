@@ -27,6 +27,9 @@ pub struct LineworkPoint {
     pub position: [f64; 2],
     #[serde(default = "default_width_factor")]
     pub width_factor: f32,
+    /// A hard corner whose adjacent curve handles are suppressed.
+    #[serde(default)]
+    pub pointed: bool,
 }
 
 fn default_width_factor() -> f32 {
@@ -36,7 +39,7 @@ fn default_width_factor() -> f32 {
 impl LineworkPoint {
     pub fn new(position: [f64; 2]) -> Result<Self, String> {
         validate_position(position)?;
-        Ok(Self { id: fresh_id(), position, width_factor: 1.0 })
+        Ok(Self { id: fresh_id(), position, width_factor: 1.0, pointed: false })
     }
 
     pub fn with_id(id: u64, position: [f64; 2], width_factor: f32) -> Result<Self, String> {
@@ -45,7 +48,7 @@ impl LineworkPoint {
         if id == 0 {
             return Err("linework point id must be non-zero".into());
         }
-        Ok(Self { id, position, width_factor })
+        Ok(Self { id, position, width_factor, pointed: false })
     }
 }
 
