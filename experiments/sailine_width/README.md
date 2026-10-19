@@ -53,13 +53,17 @@ the user drags horizontally; a click alone selects and does not edit. Dragging r
 dragging left decreases pressure, clamped to 0–200%, previewed during the gesture (canvas rerender capped at about 30 Hz to keep dragging responsive) and committed as
 one undo step on release. The base path-width control remains independent.
 
-The width renderer currently makes an offset outline from the interpolated centerline and adds
-round caps at nonzero open endpoints. This is a working visual implementation, not yet a confirmed
-pixel-equivalent Sai join/overlap rasterizer. Engine tests cover 0–200% pressure, insertion, undo,
-redo, serialization and compatibility defaults. UI tests cover the shared shortcuts and click vs
-drag behavior. The six-capture experiment is a raster comparison, not a statistical identification:
-one screenshot scale is inferred from the grid and the center path is reconstructed from the
-validated geometric model.
+The width renderer makes an offset outline from the interpolated centerline, interpolates pressure
+linearly by normalized arc length within each segment, and adds a round disk at each nonzero open
+endpoint with the corresponding effective radius. Arc-length pressure was chosen after interactive
+testing showed a slight endpoint swelling with Bézier-parameter interpolation; the six-reference
+benchmark also ranked arc length first, though its 0.071 px lead is within extraction uncertainty.
+This remains a working visual implementation, not a confirmed pixel-equivalent Sai
+join/overlap rasterizer. Engine tests cover 0–200% pressure, insertion, undo, redo, serialization,
+compatibility defaults, arc-length progress, and effective cap diameter. UI tests cover the shared
+shortcuts and click vs drag behavior. The six-capture experiment is a raster comparison, not a
+statistical identification: one screenshot scale is inferred from the grid and the center path is
+reconstructed from the validated geometric model.
 
 ## Key files
 

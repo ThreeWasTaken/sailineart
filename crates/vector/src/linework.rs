@@ -43,6 +43,25 @@ fn smoothstep01(value: f64) -> f64 {
     value * value * (3.0 - 2.0 * value)
 }
 
+fn cubic_point(segment: &[Point; 4], t: f64) -> [f64; 2] {
+    let u = 1.0 - t;
+    [
+        u * u * u * segment[0].x + 3.0 * u * u * t * segment[1].x + 3.0 * u * t * t * segment[2].x + t * t * t * segment[3].x,
+        u * u * u * segment[0].y + 3.0 * u * u * t * segment[1].y + 3.0 * u * t * t * segment[2].y + t * t * t * segment[3].y,
+    ]
+}
+
+fn normalized_arc_fractions(samples: &[[f64; 2]]) -> Vec<f64> {
+    let mut lengths = Vec::with_capacity(samples.len());
+    lengths.push(0.0);
+    for pair in samples.windows(2) {
+        let distance = (pair[1][0] - pair[0][0]).hypot(pair[1][1] - pair[0][1]);
+        lengths.push(lengths.last().copied().unwrap_or(0.0) + distance);
+    }
+    let total = lengths.last().copied().unwrap_or(0.0).max(1e-9);
+    lengths.into_iter().map(|length| length / total).collect()
+}
+
 fn endpoint_extrapolation_weight(first: [f64; 2], second: [f64; 2]) -> f64 {
     let first_length = first[0].hypot(first[1]);
     let second_length = second[0].hypot(second[1]);
@@ -316,7 +335,7 @@ fn interpolate_sai(points: &[[f64; 2]], model: InterpolationModel) -> Result<Pat
     Ok(Path::new(vec![Subpath { closed: false, knots, op: PathOp::Combine }]))
 }
 
-/// Build a filled outline with linearly interpolated width factors at the logical anchors.
+/// Build a filled outline with width factors interpolated linearly along each segment's arc length.
 pub fn variable_width_shape(points: &[[f64; 2]], factors: &[f32], width: f64, color: Color, handle: Option<[f64; 2]>) -> Result<ShapeLayer, String> {
     variable_width_shape_with_model(points, factors, width, color, handle, InterpolationModel::SaiSimplified)
 }
@@ -393,15 +412,15 @@ pub fn variable_width_shape_with_model(
         }
         let minimum_radius = (width * 0.25).max(0.25);
         let sample_count = ((segment_length / minimum_radius).ceil() as usize + 1).clamp(64, 512);
+        let curve_samples: Vec<_> = (0..sample_count).map(|step| cubic_point(segment, step as f64 / (sample_count - 1) as f64)).collect();
+        let arc_fractions = normalized_arc_fractions(&curve_samples);
         let steps = if Some(index) == last_visible { sample_count } else { sample_count - 1 };
         for step in 0..steps {
-            let t = step as f64 / (sample_count - 1) as f64;
-            let u = 1.0 - t;
-            let p = [
-                u * u * u * segment[0].x + 3.0 * u * u * t * segment[1].x + 3.0 * u * t * t * segment[2].x + t * t * t * segment[3].x,
-                u * u * u * segment[0].y + 3.0 * u * u * t * segment[1].y + 3.0 * u * t * t * segment[2].y + t * t * t * segment[3].y,
-            ];
-            let factor = factors[index] as f64 * (1.0 - t) + factors[index + 1] as f64 * t;
+            let p = curve_samples[step];
+            // Bézier t is not proportional to distance along a curved cubic. Using normalized
+            // arc length prevents pressure changes from bunching up near zero-tangent endpoints.
+            let arc_fraction = arc_fractions[step];
+            let factor = factors[index] as f64 * (1.0 - arc_fraction) + factors[index + 1] as f64 * arc_fraction;
             let radius = width * factor.max(0.0) * 0.5;
             samples.push((p, radius));
         }
@@ -420,20 +439,20 @@ pub fn variable_width_shape_with_model(
     right.reverse();
     left.extend(right);
     let mut subpaths = if left.len() >= 3 { vec![Subpath::polygon(&left).with_op(PathOp::Combine)] } else { Vec::new() };
-    // Round open endpoints with their actual effective radius. The sampled side outline closes
-    // with a diameter; these unions turn that butt closure into the round cap SAI shows.
+    // Round open endpoints with their effective width. Full disks are correct when their
+    // diameter matches the local stroke; the arc-length profile above keeps that join gradual.
     for index in [0, points.len().saturating_sub(1)] {
         let radius = width * f64::from(factors[index].max(0.0)) * 0.5;
         if radius <= 0.0 {
             continue;
         }
-        let circle: Vec<(f64, f64)> = (0..48)
+        let disk: Vec<(f64, f64)> = (0..48)
             .map(|step| {
                 let angle = std::f64::consts::TAU * step as f64 / 48.0;
                 (points[index][0] + angle.cos() * radius, points[index][1] + angle.sin() * radius)
             })
             .collect();
-        subpaths.push(Subpath::polygon(&circle).with_op(PathOp::Combine));
+        subpaths.push(Subpath::polygon(&disk).with_op(PathOp::Combine));
     }
     for (index, point) in outline_points.iter().enumerate() {
         if index == 0 || index + 1 == points.len() {
@@ -774,6 +793,27 @@ mod tests {
         let xs: Vec<_> = cap.knots.iter().map(|knot| knot.anchor.x).collect();
         assert!((xs.iter().copied().fold(f64::NEG_INFINITY, f64::max) - 98.0).abs() < 0.1);
         assert!((xs.iter().copied().fold(f64::INFINITY, f64::min) - 82.0).abs() < 0.1);
+    }
+
+    #[test]
+    fn two_hundred_percent_endpoint_cap_matches_the_effective_width() {
+        let shape =
+            variable_width_shape_with_model(&[[10.0, 20.0], [90.0, 20.0]], &[1.0, 2.0], 8.0, Color::BLACK, None, InterpolationModel::SaiSimplified).unwrap();
+        let cap = shape.path.subpaths.last().unwrap();
+        let xs: Vec<_> = cap.knots.iter().map(|knot| knot.anchor.x).collect();
+        let diameter = xs.iter().copied().fold(f64::NEG_INFINITY, f64::max) - xs.iter().copied().fold(f64::INFINITY, f64::min);
+        assert!((diameter - 16.0).abs() < 0.1, "200% pressure on an 8 px line should produce a 16 px cap");
+    }
+
+    #[test]
+    fn pressure_progress_follows_distance_on_a_curved_segment() {
+        let segment = [Point::new(0.0, 0.0), Point::new(0.0, 100.0), Point::new(25.0, 0.0), Point::new(100.0, 0.0)];
+        let samples: Vec<_> = (0..=64).map(|i| cubic_point(&segment, i as f64 / 64.0)).collect();
+        let fractions = normalized_arc_fractions(&samples);
+        assert_eq!(fractions.first(), Some(&0.0));
+        assert_eq!(fractions.last(), Some(&1.0));
+        assert!(fractions.windows(2).all(|pair| pair[0] <= pair[1]));
+        assert!((fractions[32] - 0.5).abs() > 0.05, "curved segment's halfway parameter is not its halfway arc length");
     }
 
     #[test]
