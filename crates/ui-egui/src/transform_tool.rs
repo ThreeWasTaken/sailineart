@@ -94,7 +94,7 @@ pub struct TransformPreview {
     committing: Option<JobId>,
     /// Content-Aware Scale's live preview (cas_transform.rs).
     pub(crate) content_aware: Option<crate::cas_transform::Live>,
-    /// SaiLine transforms live point coordinates; the pixel preview is only a host for the shared
+    /// SaiLineArt transforms live point coordinates; the pixel preview is only a host for the shared
     /// transform frame and gesture machinery.
     sailine_points: Option<SaiLineTransform>,
 }
@@ -190,8 +190,8 @@ fn corners(r: [f64; 4]) -> [[f64; 2]; 4] {
 /// Start Free Transform on the active layer (or its selected pixels), or on the targeted unlinked
 /// layer mask, alpha channel or Quick Mask.
 pub fn begin(app: &mut PhotocraftApp, ctx: &egui::Context) -> Result<(), String> {
-    // SaiLine has no raster payload for the generic layer transform to commit. With no
-    // individual points selected, Ctrl+T on a SaiLine tool therefore targets all control points
+    // SaiLineArt has no raster payload for the generic layer transform to commit. With no
+    // individual points selected, Ctrl+T on a SaiLineArt tool therefore targets all control points
     // in the active linework layer and uses the same live vector transform path.
     if crate::sailine_ui::is_sailine_tool(app.ui.tool) && app.ui.sailine_selections.is_empty() {
         select_active_linework_points(app);
@@ -311,7 +311,7 @@ fn select_active_linework_points(app: &mut PhotocraftApp) {
     }
 }
 
-/// Ctrl+T on a SaiLine point selection opens the shared transform frame without lifting or
+/// Ctrl+T on a SaiLineArt point selection opens the shared transform frame without lifting or
 /// rasterizing the vector layer. Stable point ids are captured for the entire session.
 fn begin_sailine_points(app: &mut PhotocraftApp, ctx: &egui::Context) -> Result<Option<()>, String> {
     let Some(st) = app.session.active() else { return Ok(None) };
@@ -339,7 +339,7 @@ fn begin_sailine_points(app: &mut PhotocraftApp, ctx: &egui::Context) -> Result<
         })
         .collect();
     if origins.len() != selections.len() {
-        return Err("Some selected SaiLine points no longer exist".into());
+        return Err("Some selected SaiLineArt points no longer exist".into());
     }
     let min_x = origins.iter().map(|p| p[0]).fold(f64::INFINITY, f64::min);
     let max_x = origins.iter().map(|p| p[0]).fold(f64::NEG_INFINITY, f64::max);

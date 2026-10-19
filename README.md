@@ -304,6 +304,8 @@ Maintainers: [`docs/releasing.md`](docs/releasing.md) explains how releases are 
 
 Developer, architecture, automation, format, and security documentation is maintained in the [PhotoCraft documentation book](book/).
 
+The [SaiLineArt user manual](docs/sailineart.html) is an illustrated guide to the seven Linework tools, shared point editing, pressure, and transformations. The [technical SaiLineArt reference](docs/sailineart.md) covers architecture, geometry, validation, and known limits.
+
 To self-host the browser version with Docker, see [Docker web hosting](packaging/web/README.md#docker).
 
 ## Security

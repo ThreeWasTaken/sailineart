@@ -151,11 +151,11 @@ pub fn tool_icon(t: Tool) -> &'static str {
         Tool::Pen => "pen-tool",
         Tool::FreeformPen => "pen-freeform",
         Tool::CurvaturePen => "pen-curvature",
-        Tool::SaiCurve => "spline",
+        Tool::SaiCurve => "sai-curve",
         Tool::SaiPressure => "sai-pressure",
         Tool::SaiStraight => "sai-line",
-        Tool::SaiWeight => "spline-width",
-        Tool::SaiCombine => "link-2",
+        Tool::SaiWeight => "sai-weight",
+        Tool::SaiCombine => "sai-combine",
         Tool::SaiPointed => "sai-pointed",
         Tool::SaiColor => "sai-color",
         Tool::AddAnchorPoint => "pen-add-anchor",
@@ -246,6 +246,23 @@ mod tests {
         }
         assert_eq!(tool_icon(Tool::Gradient), "gradient");
         assert_ne!(tool_icon(Tool::Gradient), tool_icon(Tool::PaintBucket));
+    }
+
+    #[test]
+    fn sailine_tool_icons_are_valid_svg_without_white_handle_fills() {
+        for name in ["sai-color", "sai-combine", "sai-curve", "sai-line", "sai-pointed", "sai-pressure", "sai-weight"] {
+            let egui::ImageSource::Bytes { bytes, .. } = white_icons().source(name) else {
+                panic!("{name} must be embedded as SVG bytes");
+            };
+            let svg = std::str::from_utf8(bytes.as_ref()).unwrap();
+            assert!(!svg.contains("fill=\"white\""), "{name} must keep its handles transparent");
+            egui_extras::image::load_svg_bytes_with_size(
+                bytes.as_ref(),
+                egui::load::SizeHint::Size { width: 64, height: 64, maintain_aspect_ratio: true },
+                &Default::default(),
+            )
+            .unwrap_or_else(|error| panic!("{name} failed to rasterize: {error}"));
+        }
     }
 
     #[test]

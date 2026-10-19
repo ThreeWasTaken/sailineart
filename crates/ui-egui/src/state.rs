@@ -626,6 +626,9 @@ pub struct ToolOptions {
     pub stroke_width: f32,
     #[serde(default = "default_sailine_width")]
     pub sailine_width: f32,
+    /// SaiCurve: taper the first and last control points to zero pressure.
+    #[serde(default)]
+    pub sailine_brush_mode: bool,
     #[serde(default)]
     pub shape_stroke: crate::shape_stroke_ui::StrokeOptions,
     pub corner_radius: f32,
@@ -846,6 +849,7 @@ impl Default for ToolOptions {
             shape_fill: true,
             stroke_width: 0.0,
             sailine_width: default_sailine_width(),
+            sailine_brush_mode: false,
             shape_stroke: Default::default(),
             corner_radius: 0.0,
             polygon_sides: 5,
@@ -1176,12 +1180,12 @@ pub struct UiState {
     /// Pen path under construction.
     #[serde(default)]
     pub pen: Option<crate::vector_ui::PenPath>,
-    /// SaiLine draft, tied to this session's document; exposed to inspection, never restored.
+    /// SaiLineArt draft, tied to this session's document; exposed to inspection, never restored.
     #[serde(default, skip_deserializing)]
     pub sailine: Option<crate::sailine_ui::Draft>,
     #[serde(default, skip_deserializing)]
     pub sailine_selection: Option<crate::sailine_ui::Selection>,
-    /// Additional SaiLine point selections (the primary selection is kept above for compatibility).
+    /// Additional SaiLineArt point selections (the primary selection is kept above for compatibility).
     #[serde(default)]
     pub sailine_selections: Vec<crate::sailine_ui::Selection>,
     #[serde(default, skip_deserializing)]

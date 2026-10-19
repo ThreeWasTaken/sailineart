@@ -1,4 +1,4 @@
-//! Headless SaiLine milestone commands.
+//! Headless SaiLineArt linework commands.
 //!
 //! The command stores canonical point data in the dedicated document model. The interpolated path
 //! remains a response aid for clients that want an immediate preview.
@@ -135,8 +135,9 @@ fn render_shape(
     handle: Option<[f64; 2]>,
     model: vector::linework::InterpolationModel,
     pointed: &[bool],
+    closed: bool,
 ) -> Result<ShapeLayer> {
-    vector::linework::variable_width_shape_with_model_and_pointed(points, factors, f64::from(width), color, handle, model, pointed).map_err(EngineError::Other)
+    vector::linework::variable_width_shape_with_model_and_pointed_closed(points, factors, f64::from(width), color, handle, model, pointed, closed).map_err(EngineError::Other)
 }
 
 fn composite_cache(rect: photocraft_geom::Rect, base: Option<Surface>, overlay: &LineworkPathCache) -> Surface {
@@ -210,7 +211,7 @@ fn refresh_linework_cache(
         let points: Vec<[f64; 2]> = path.points.iter().map(|point| point.position).collect();
         let factors: Vec<f32> = path.points.iter().map(|point| point.width_factor).collect();
         let pointed: Vec<bool> = path.points.iter().map(|point| point.pointed).collect();
-        let mut shape = render_shape(&points, &factors, path.color, path.width, path.handle, model, &pointed)?;
+        let mut shape = render_shape(&points, &factors, path.color, path.width, path.handle, model, &pointed, path.closed)?;
         crate::vector_cmds::refresh_shape(doc, &mut shape);
         let rendered_surface = shape.cache.ok_or(EngineError::Other("linework render cache missing".into()))?;
         let rendered = LineworkPathCache::from_surface(&rendered_surface);
@@ -246,7 +247,7 @@ fn refresh_linework_cache(
 
 /// Rebuild the transient Linework render cache before operations that need its pixel output.
 /// The canonical point data stays untouched; a missing cache (for example after loading a
-/// document) is rendered with SaiLine's production interpolation model.
+/// document) is rendered with SaiLineArt's production interpolation model.
 pub(crate) fn ensure_rendered(doc: &mut photocraft_doc::Document, layer_id: photocraft_doc::LayerId) -> Result<()> {
     let path_ids = {
         let layer = doc.layer(layer_id).ok_or(EngineError::NoLayer(layer_id))?;
@@ -277,7 +278,7 @@ fn create(s: &mut Session, p: &Value) -> Result<Value> {
         point.pointed = value;
     }
     line.handle = live_handle;
-    let mut shape = render_shape(&points, &factors, color, stroke_width, live_handle, model, &pointed)
+    let mut shape = render_shape(&points, &factors, color, stroke_width, live_handle, model, &pointed, false)
         .map_err(|error| EngineError::BadParams { cmd: CMD.into(), msg: error.to_string() })?;
     let requested_name = p.get("name").and_then(Value::as_str).map(str::to_string);
     let id = s.edit("New Linework Path", |doc, active| {
@@ -741,45 +742,58 @@ fn combine_paths(s: &mut Session, p: &Value) -> Result<Value> {
     let point_a = p.get("pointA").and_then(Value::as_u64).ok_or_else(|| EngineError::BadParams { cmd: COMBINE_CMD.into(), msg: "`pointA` required".into() })?;
     let path_b = p.get("pathB").and_then(Value::as_u64).ok_or_else(|| EngineError::BadParams { cmd: COMBINE_CMD.into(), msg: "`pathB` required".into() })?;
     let point_b = p.get("pointB").and_then(Value::as_u64).ok_or_else(|| EngineError::BadParams { cmd: COMBINE_CMD.into(), msg: "`pointB` required".into() })?;
-    if path_a == path_b {
-        return Err(EngineError::BadParams { cmd: COMBINE_CMD.into(), msg: "choose endpoints from two different paths".into() });
-    }
+    let self_close = path_a == path_b;
     s.edit("Combine Linework Paths", |doc, _| {
         {
             let LayerContent::Linework(lw) = &mut doc.layer_mut(layer).ok_or(EngineError::NoLayer(layer))?.content else {
                 return Err(EngineError::Other("layer is not Linework".into()));
             };
             let ia = lw.paths.iter().position(|p| p.id == path_a).ok_or_else(|| EngineError::Other("first path not found".into()))?;
-            let ib = lw.paths.iter().position(|p| p.id == path_b).ok_or_else(|| EngineError::Other("second path not found".into()))?;
-            let mut a = lw.paths[ia].clone();
-            let mut b = lw.paths[ib].clone();
-            let ea = a.points.iter().position(|p| p.id == point_a).ok_or_else(|| EngineError::Other("first endpoint not found".into()))?;
-            let eb = b.points.iter().position(|p| p.id == point_b).ok_or_else(|| EngineError::Other("second endpoint not found".into()))?;
-            if ea != 0 && ea + 1 != a.points.len() || eb != 0 && eb + 1 != b.points.len() {
-                return Err(EngineError::BadParams { cmd: COMBINE_CMD.into(), msg: "combine requires path endpoints".into() });
+            if self_close {
+                let path = &mut lw.paths[ia];
+                if path.closed {
+                    return Err(EngineError::Other("path is already closed".into()));
+                }
+                let first = path.points.first().ok_or_else(|| EngineError::Other("linework path has no points".into()))?.id;
+                let last = path.points.last().ok_or_else(|| EngineError::Other("linework path has no points".into()))?.id;
+                if path.points.len() < 3 || !((point_a == first && point_b == last) || (point_a == last && point_b == first)) {
+                    return Err(EngineError::BadParams { cmd: COMBINE_CMD.into(), msg: "closing a path requires its two distinct endpoints and at least three points".into() });
+                }
+                path.closed = true;
+                path.handle = None;
+            } else {
+                let ib = lw.paths.iter().position(|p| p.id == path_b).ok_or_else(|| EngineError::Other("second path not found".into()))?;
+                let mut a = lw.paths[ia].clone();
+                let mut b = lw.paths[ib].clone();
+                let ea = a.points.iter().position(|p| p.id == point_a).ok_or_else(|| EngineError::Other("first endpoint not found".into()))?;
+                let eb = b.points.iter().position(|p| p.id == point_b).ok_or_else(|| EngineError::Other("second endpoint not found".into()))?;
+                if ea != 0 && ea + 1 != a.points.len() || eb != 0 && eb + 1 != b.points.len() {
+                    return Err(EngineError::BadParams { cmd: COMBINE_CMD.into(), msg: "combine requires path endpoints".into() });
+                }
+                if ea == 0 {
+                    a.points.reverse();
+                }
+                if eb + 1 == b.points.len() {
+                    b.points.reverse();
+                }
+                let same = (a.points.last().unwrap().position[0] - b.points.first().unwrap().position[0])
+                    .hypot(a.points.last().unwrap().position[1] - b.points.first().unwrap().position[1])
+                    < 1e-6;
+                if same {
+                    b.points.remove(0);
+                }
+                a.points.extend(b.points);
+                a.handle = None;
+                lw.paths.retain(|p| p.id != path_b);
+                let ai = lw.paths.iter().position(|p| p.id == path_a).unwrap();
+                lw.paths[ai] = a;
             }
-            if ea == 0 {
-                a.points.reverse();
-            }
-            if eb + 1 == b.points.len() {
-                b.points.reverse();
-            }
-            let same = (a.points.last().unwrap().position[0] - b.points.first().unwrap().position[0])
-                .hypot(a.points.last().unwrap().position[1] - b.points.first().unwrap().position[1])
-                < 1e-6;
-            if same {
-                b.points.remove(0);
-            }
-            a.points.extend(b.points);
-            a.handle = None;
-            lw.paths.retain(|p| p.id != path_b);
-            let ai = lw.paths.iter().position(|p| p.id == path_a).unwrap();
-            lw.paths[ai] = a;
         }
-        refresh_linework_cache(doc, layer, &[path_a, path_b], model)?;
+        let changed = if self_close { vec![path_a] } else { vec![path_a, path_b] };
+        refresh_linework_cache(doc, layer, &changed, model)?;
         Ok(())
     })?;
-    Ok(json!({"layer":layer.0,"path":path_a,"removedPath":path_b}))
+    Ok(json!({"layer":layer.0,"path":path_a,"removedPath":if self_close { None } else { Some(path_b) },"closed":self_close}))
 }
 
 /// Rebuild ephemeral Linework raster caches for a UI-selected model. This is deliberately not an

@@ -1,4 +1,4 @@
-//! Geometry helpers for the SaiLine linework prototype.
+//! Geometry helpers for the SaiLineArt linework editor.
 //!
 //! The document keeps canonical anchors and an optional live handle; this module derives the cubic
 //! Bézier path consumed by the existing renderer so the engine and UI share one interpolation.
@@ -85,7 +85,7 @@ pub fn interpolate_points(points: &[[f64; 2]]) -> Result<Path, String> {
     interpolate_points_with_handle(points, None)
 }
 
-/// Interpolate with an optional live handle at the last anchor. SaiLine uses the handle's
+/// Interpolate with an optional live handle at the last anchor. SaiLineArt uses the handle's
 /// direction for the incoming tangent and its distance as the rounding amount.
 pub fn interpolate_points_with_handle(points: &[[f64; 2]], handle: Option<[f64; 2]>) -> Result<Path, String> {
     interpolate_points_with_model(points, handle, InterpolationModel::SaiSimplified)
@@ -209,7 +209,7 @@ pub fn interpolate_points_with_model_and_pointed(
             }
         }
     }
-    // With two anchors SaiLine treats the live cursor as the quadratic control point for the
+    // With two anchors SaiLineArt treats the live cursor as the quadratic control point for the
     // whole arc. This keeps both ends on the same side of the chord instead of twisting the
     // first tangent away from the cursor.
     if n == 2
@@ -363,6 +363,66 @@ fn interpolate_sai(points: &[[f64; 2]], model: InterpolationModel, pointed: &[bo
     Ok(Path::new(vec![Subpath { closed: false, knots, op: PathOp::Combine }]))
 }
 
+/// Interpolate a closed SaiLineArt path with cyclic Catmull–Rom tangents. The open-path
+/// interpolation above is intentionally unchanged; closure only affects paths explicitly
+/// joined by SaiCombine.
+pub fn interpolate_closed_points_with_model_and_pointed(
+    points: &[[f64; 2]],
+    model: InterpolationModel,
+    pointed: &[bool],
+) -> Result<Path, String> {
+    if points.len() < 3 {
+        return Err("closed linework paths need at least three points".into());
+    }
+    if points.len() > MAX_POINTS {
+        return Err(format!("linework accepts at most {MAX_POINTS} points"));
+    }
+    if pointed.len() != points.len() {
+        return Err("linework pointed states must match point count".into());
+    }
+    if points.iter().any(|point| point.iter().any(|value| !value.is_finite() || value.abs() > 1_000_000.0)) {
+        return Err("linework points must be finite and within ±1000000 px".into());
+    }
+    let (alpha, beta, tension) = if model == InterpolationModel::SaiOptimized { (0.3375, 0.4875, -0.2) } else { (1.0 / 3.0, 0.5, -0.2) };
+    let count = points.len();
+    let distance = |a: [f64; 2], b: [f64; 2]| (a[0] - b[0]).hypot(a[1] - b[1]);
+    let spans: Vec<_> = (0..count).map(|index| distance(points[index], points[(index + 1) % count]).max(1e-9).powf(alpha)).collect();
+    let mut knots = Vec::with_capacity(count);
+    for index in 0..count {
+        let previous = (index + count - 1) % count;
+        let next = (index + 1) % count;
+        let anchor = Point::new(points[index][0], points[index][1]);
+        let previous_span = spans[previous];
+        let next_span = spans[index];
+        let previous_secant = [
+            (points[index][0] - points[previous][0]) / previous_span,
+            (points[index][1] - points[previous][1]) / previous_span,
+        ];
+        let next_secant = [(points[next][0] - points[index][0]) / next_span, (points[next][1] - points[index][1]) / next_span];
+        let previous_length = distance(points[index], points[previous]);
+        let next_length = distance(points[next], points[index]);
+        let ratio = previous_length.min(next_length) / previous_length.max(next_length).max(1e-12);
+        let scale = ratio.max(1e-12).powf(beta) * (1.0 - tension);
+        let tangent = [
+            (previous_secant[0] * next_span + next_secant[0] * previous_span) / (previous_span + next_span) * scale,
+            (previous_secant[1] * next_span + next_secant[1] * previous_span) / (previous_span + next_span) * scale,
+        ];
+        let (in_ctrl, out_ctrl) = if pointed[index] {
+            (
+                Point::new(anchor.x - (anchor.x - points[previous][0]) / 3.0, anchor.y - (anchor.y - points[previous][1]) / 3.0),
+                Point::new(anchor.x + (points[next][0] - anchor.x) / 3.0, anchor.y + (points[next][1] - anchor.y) / 3.0),
+            )
+        } else {
+            (
+                Point::new(anchor.x - tangent[0] * previous_span / 3.0, anchor.y - tangent[1] * previous_span / 3.0),
+                Point::new(anchor.x + tangent[0] * next_span / 3.0, anchor.y + tangent[1] * next_span / 3.0),
+            )
+        };
+        knots.push(Knot { anchor, in_ctrl, out_ctrl, smooth: !pointed[index] });
+    }
+    Ok(Path::new(vec![Subpath { closed: true, knots, op: PathOp::Combine }]))
+}
+
 /// Build a filled outline with width factors interpolated linearly along each segment's arc length.
 pub fn variable_width_shape(points: &[[f64; 2]], factors: &[f32], width: f64, color: Color, handle: Option<[f64; 2]>) -> Result<ShapeLayer, String> {
     variable_width_shape_with_model(points, factors, width, color, handle, InterpolationModel::SaiSimplified)
@@ -390,6 +450,19 @@ pub fn variable_width_shape_with_model_and_pointed(
     model: InterpolationModel,
     pointed: &[bool],
 ) -> Result<ShapeLayer, String> {
+    variable_width_shape_with_model_and_pointed_closed(points, factors, width, color, handle, model, pointed, false)
+}
+
+pub fn variable_width_shape_with_model_and_pointed_closed(
+    points: &[[f64; 2]],
+    factors: &[f32],
+    width: f64,
+    color: Color,
+    handle: Option<[f64; 2]>,
+    model: InterpolationModel,
+    pointed: &[bool],
+    closed: bool,
+) -> Result<ShapeLayer, String> {
     if factors.len() != points.len() {
         return Err("linework width factors must match point count".into());
     }
@@ -407,7 +480,7 @@ pub fn variable_width_shape_with_model_and_pointed(
     // a visible spur. Keep the canonical points and interpolation untouched; only merge this
     // covered portion of the *raster outline* into the endpoint, fading the merge out smoothly.
     let mut outline_points = points.to_vec();
-    if points.len() >= 3 {
+    if !closed && points.len() >= 3 {
         let endpoint_overlap = |end: usize, adjacent: usize, following: usize| {
             let pressure_similarity = 1.0 - smoothstep01((f64::from((factors[end] - factors[adjacent]).abs()) - 0.02) / 0.08);
             if pressure_similarity <= 0.0 {
@@ -445,12 +518,16 @@ pub fn variable_width_shape_with_model_and_pointed(
             }
         }
     }
-    let center = interpolate_points_with_model_and_pointed(&outline_points, handle, model, pointed)?;
+    let center = if closed {
+        interpolate_closed_points_with_model_and_pointed(&outline_points, model, pointed)?
+    } else {
+        interpolate_points_with_model_and_pointed(&outline_points, handle, model, pointed)?
+    };
     let segments = center.subpaths.first().ok_or("linework path has no subpath")?.segments();
     let mut samples = Vec::new();
-    let last_visible = outline_points.windows(2).rposition(|pair| (pair[1][0] - pair[0][0]).hypot(pair[1][1] - pair[0][1]) > 1e-9);
     for (index, segment) in segments.iter().enumerate() {
-        let segment_length = (outline_points[index + 1][0] - outline_points[index][0]).hypot(outline_points[index + 1][1] - outline_points[index][1]);
+        let next_index = (index + 1) % outline_points.len();
+        let segment_length = (outline_points[next_index][0] - outline_points[index][0]).hypot(outline_points[next_index][1] - outline_points[index][1]);
         if segment_length <= 1e-9 {
             continue;
         }
@@ -458,13 +535,13 @@ pub fn variable_width_shape_with_model_and_pointed(
         let sample_count = ((segment_length / minimum_radius).ceil() as usize + 1).clamp(64, 512);
         let curve_samples: Vec<_> = (0..sample_count).map(|step| cubic_point(segment, step as f64 / (sample_count - 1) as f64)).collect();
         let arc_fractions = normalized_arc_fractions(&curve_samples);
-        let steps = if Some(index) == last_visible { sample_count } else { sample_count - 1 };
+        let steps = if closed { sample_count - 1 } else if index + 1 == segments.len() { sample_count } else { sample_count - 1 };
         for step in 0..steps {
             let p = curve_samples[step];
             // Bézier t is not proportional to distance along a curved cubic. Using normalized
             // arc length prevents pressure changes from bunching up near zero-tangent endpoints.
             let arc_fraction = arc_fractions[step];
-            let factor = factors[index] as f64 * (1.0 - arc_fraction) + factors[index + 1] as f64 * arc_fraction;
+            let factor = factors[index] as f64 * (1.0 - arc_fraction) + factors[next_index] as f64 * arc_fraction;
             let radius = width * factor.max(0.0) * 0.5;
             samples.push((p, radius));
         }
@@ -472,8 +549,8 @@ pub fn variable_width_shape_with_model_and_pointed(
     let mut left = Vec::with_capacity(samples.len());
     let mut right = Vec::with_capacity(samples.len());
     for (index, (center, radius)) in samples.iter().enumerate() {
-        let previous = samples.get(index.saturating_sub(1)).map_or(*center, |sample| sample.0);
-        let next = samples.get((index + 1).min(samples.len().saturating_sub(1))).map_or(*center, |sample| sample.0);
+        let previous = if closed { samples[(index + samples.len() - 1) % samples.len()].0 } else { samples.get(index.saturating_sub(1)).map_or(*center, |sample| sample.0) };
+        let next = if closed { samples[(index + 1) % samples.len()].0 } else { samples.get((index + 1).min(samples.len().saturating_sub(1))).map_or(*center, |sample| sample.0) };
         let tangent = [next[0] - previous[0], next[1] - previous[1]];
         let length = tangent[0].hypot(tangent[1]).max(1e-9);
         let normal = [-tangent[1] / length, tangent[0] / length];
@@ -485,7 +562,7 @@ pub fn variable_width_shape_with_model_and_pointed(
     let mut subpaths = if left.len() >= 3 { vec![Subpath::polygon(&left).with_op(PathOp::Combine)] } else { Vec::new() };
     // Round open endpoints with their effective width. Full disks are correct when their
     // diameter matches the local stroke; the arc-length profile above keeps that join gradual.
-    for index in [0, points.len().saturating_sub(1)] {
+    for index in if closed { Vec::new() } else { vec![0, points.len().saturating_sub(1)] } {
         let radius = width * f64::from(factors[index].max(0.0)) * 0.5;
         if radius <= 0.0 {
             continue;
@@ -499,7 +576,7 @@ pub fn variable_width_shape_with_model_and_pointed(
         subpaths.push(Subpath::polygon(&disk).with_op(PathOp::Combine));
     }
     for (index, point) in outline_points.iter().enumerate() {
-        if index == 0 || index + 1 == points.len() {
+        if !closed && (index == 0 || index + 1 == points.len()) {
             continue;
         }
         // Pointed changes the centerline direction at this anchor, while the stroke join
@@ -572,6 +649,35 @@ mod tests {
         assert!(subpath.knots[1].smooth);
         assert!(!subpath.knots[0].smooth);
         assert!(!subpath.knots[3].smooth);
+    }
+
+    #[test]
+    fn closed_interpolation_wraps_segments_and_keeps_a_smooth_seam() {
+        let points = [[10.0, 10.0], [70.0, 10.0], [80.0, 70.0], [20.0, 80.0]];
+        let curve = interpolate_closed_points_with_model_and_pointed(&points, InterpolationModel::SaiSimplified, &[false; 4]).unwrap();
+        let subpath = &curve.subpaths[0];
+        assert!(subpath.closed);
+        let segments = subpath.segments();
+        assert_eq!(segments.len(), points.len());
+        assert_eq!(segments[0][0], segments.last().unwrap()[3]);
+        let outgoing = [segments[0][1].x - segments[0][0].x, segments[0][1].y - segments[0][0].y];
+        let incoming = [segments.last().unwrap()[3].x - segments.last().unwrap()[2].x, segments.last().unwrap()[3].y - segments.last().unwrap()[2].y];
+        let cross = outgoing[0] * incoming[1] - outgoing[1] * incoming[0];
+        let dot = outgoing[0] * incoming[0] + outgoing[1] * incoming[1];
+        assert!(cross.abs() < 1e-8 && dot > 0.0, "closed seam tangents should align: {outgoing:?} vs {incoming:?}");
+        let shape = variable_width_shape_with_model_and_pointed_closed(
+            &points,
+            &[1.0; 4],
+            6.0,
+            Color::BLACK,
+            None,
+            InterpolationModel::SaiSimplified,
+            &[false; 4],
+            true,
+        )
+        .unwrap();
+        assert_eq!(shape.path.subpaths.len(), 1, "closed outlines have no endpoint cap disks");
+        assert!(shape.path.subpaths[0].closed);
     }
 
     #[test]

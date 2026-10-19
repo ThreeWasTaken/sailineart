@@ -1,4 +1,4 @@
-//! SaiLine command, persistence and history.
+//! SaiLineArt command, persistence and history.
 
 use photocraft_doc::LayerContent;
 use photocraft_engine::Session;
@@ -15,7 +15,7 @@ fn creates_a_dedicated_linework_layer() {
     s.execute("file.new", json!({"width": 128, "height": 96})).unwrap();
     let before = s.active().unwrap().doc.layers.len();
     let result = s
-        .execute("linework.create", json!({"points": [[10.0, 12.0], [40.0, 70.0], [100.0, 24.0]], "width": 5.0, "color": "#3366cc", "name": "SaiLine test"}))
+        .execute("linework.create", json!({"points": [[10.0, 12.0], [40.0, 70.0], [100.0, 24.0]], "width": 5.0, "color": "#3366cc", "name": "SaiLineArt test"}))
         .unwrap();
     let id = result["layer"].as_u64().unwrap();
     assert_eq!(result["kind"], "linework");
@@ -185,6 +185,28 @@ fn combining_two_linework_endpoints_keeps_point_properties_and_is_undoable() {
     assert!(s.undo());
     let LayerContent::Linework(lw) = &s.active().unwrap().doc.layer(layer).unwrap().content else { panic!() };
     assert_eq!(lw.paths.len(), 2);
+}
+
+#[test]
+fn combining_a_paths_own_endpoints_closes_it_and_is_undoable() {
+    let mut s = Session::new();
+    s.execute("file.new", json!({"width":96,"height":64})).unwrap();
+    let created = s.execute("linework.create", json!({"points":[[8,12],[48,48],[88,12]],"width":5,"widthFactors":[0.5,1.5,0.75]})).unwrap();
+    let layer = photocraft_doc::LayerId(created["layer"].as_u64().unwrap());
+    let (path, first, last) = {
+        let LayerContent::Linework(linework) = &s.active().unwrap().doc.layer(layer).unwrap().content else { panic!() };
+        let path = &linework.paths[0];
+        (path.id, path.points.first().unwrap().id, path.points.last().unwrap().id)
+    };
+    s.execute("linework.combinePaths", json!({"layer":layer.0,"pathA":path,"pointA":first,"pathB":path,"pointB":last})).unwrap();
+    let LayerContent::Linework(linework) = &s.active().unwrap().doc.layer(layer).unwrap().content else { panic!() };
+    assert_eq!(linework.paths.len(), 1);
+    assert!(linework.paths[0].closed);
+    assert_eq!(linework.paths[0].points.iter().map(|point| point.width_factor).collect::<Vec<_>>(), vec![0.5, 1.5, 0.75]);
+    assert!(linework.path_caches.contains_key(&path), "closing the path refreshes its raster cache");
+    assert!(s.undo());
+    let LayerContent::Linework(linework) = &s.active().unwrap().doc.layer(layer).unwrap().content else { panic!() };
+    assert!(!linework.paths[0].closed);
 }
 
 #[test]

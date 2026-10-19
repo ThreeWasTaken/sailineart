@@ -100,7 +100,7 @@ pub fn document_selection_mode(app: &PhotocraftApp, tool: Tool, m: egui::Modifie
 /// The badge the cursor of `tool` shows with modifiers `m` (None for non-selection tools or New;
 /// the anchor point tools show theirs).
 pub fn badge(app: &PhotocraftApp, tool: Tool, m: egui::Modifiers) -> Option<Badge> {
-    // SaiLine uses the same compact add/subtract cursor cues as PhotoCraft's selection tools:
+    // SaiLineArt uses the same compact add/subtract cursor cues as PhotoCraft's selection tools:
     // Ctrl over a segment inserts (+), Alt over a point or segment deletes (−), and Shift
     // announces additive point/box selection. Ctrl over a point moves it with the normal pointer;
     // the hand cursor remains reserved for moving a PhotoCraft selection.

@@ -1,4 +1,4 @@
-# SaiLine / SAI 1.2.6 Beta 3 : banc de rétro-ingénierie
+# SaiLineArt / SAI 1.2.6 Beta 3 : banc de rétro-ingénierie
 
 Ce dossier est une expérience autonome. Le calcul de production dans
 `../../crates/vector/src/linework.rs` n'est pas modifié. L'image fournie par

@@ -1,8 +1,10 @@
-# SaiLine — travail en cours
+# SaiLineArt — travail en cours
+
+> **Références actuelles :** [guide utilisateur autonome](docs/sailineart.html) et [référence technique](docs/sailineart.md). Ce fichier conserve le journal des étapes précédentes ; les listes « Travail en cours » ci-dessous décrivent l’état à la date de leur rédaction et sont historiques.
 
 ## État du chantier
 
-SaiLine est intégré nativement à PhotoCraft comme outil vectoriel dédié. Le modèle canonique
+SaiLineArt est intégré nativement à PhotoCraft comme module de tracés vectoriels dédié. Le modèle canonique
 conserve les points logiques, leurs identifiants et les attributs propres aux points. Le cache de
 rendu est dérivé et reconstruit après les modifications.
 
@@ -175,3 +177,39 @@ entièrement couvert par le cap rond. Le rendu fusionne progressivement ce retou
 quand il est court, inversé et à pression comparable ; les points enregistrés et la formule
 d'interpolation SAI simplifiée restent inchangés. La reproduction de la capture et son tracé
 inversé ne présentent plus de pointe ; un test raster protège ce cas.
+
+## État courant — guide unifié et Brush mode (2026-10-19)
+
+Le guide utilisateur illustré est maintenant [docs/sailineart.html](docs/sailineart.html) ; la
+[référence technique](docs/sailineart.md) détaille le moteur, ses validations et ses limites. Ils
+remplacent les anciens résumés de fonctionnalités comme description de l’état actuel ; les
+sections précédentes de ce journal retracent l’historique et peuvent contenir des statuts
+désormais dépassés.
+
+Le guide couvre les sept outils (SaiCurve, SaiPressure, SaiLine, SaiWeight, SaiCombine,
+SaiPointed et SaiColor), les raccourcis communs, les suppressions de segments, la sélection
+multiple, Ctrl+T, l’historique, les calques Linework, la rasterisation, la géométrie et les deux
+bancs de rétro-ingénierie. La page HTML comprend des exemples de rendu des sept outils, des
+schémas pour les raccourcis d’édition et des captures PhotoCraft hors écran pour le mode pinceau,
+le squelette de SaiPressure et le cadre de transformation. Les exemples de rendu sont
+reproductibles avec `cargo run -p photocraft-engine --example sailineart_html_examples --offline`.
+
+SaiCurve possède désormais une option **Brush mode**, désactivée par défaut. Pour un nouveau
+tracé courbe d’au moins trois points, elle initialise les facteurs de largeur des extrémités à
+0 % et ceux des points intérieurs à 100 %. Elle ne change pas la largeur de base et ne s’applique
+ni aux tracés à deux points, ni à SaiLine, ni aux chemins existants. Le brouillon montre les
+extrémités effilées ; le test UI couvre le mode activé/désactivé et les seuils de deux et trois
+points.
+
+La longueur d’arc est utilisée pour interpoler la pression dans le contour de production. Le
+benchmark la classe légèrement devant le paramètre Bézier, mais l’écart reste dans l’incertitude
+de l’extraction : ce choix repose aussi sur l’évaluation interactive, et non sur une preuve de
+la formule de SAI.
+
+## Renommage du projet SaiLineArt (2026-10-19)
+
+Le nom du projet/famille d’outils est désormais **SaiLineArt** afin de le distinguer de l’outil
+**SaiLine**, qui reste l’outil de création de segments droits. Les guides et l’exemple de
+documentation portent le nouveau nom. Les anciens identifiants internes, alias de compatibilité
+et noms de répertoires de recherche sont conservés pour ne pas casser les documents ou
+reproductions historiques.

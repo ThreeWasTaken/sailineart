@@ -41,8 +41,6 @@ pub struct PointDrag {
     pub start: [f64; 2],
     pub key: u64,
     #[serde(skip)]
-    last_preview_at: Option<Instant>,
-    #[serde(skip)]
     pending_point: Option<[f64; 2]>,
     #[serde(skip)]
     rendered_point: Option<[f64; 2]>,
@@ -265,9 +263,9 @@ pub fn tool_down(app: &mut PhotocraftApp, point: [f64; 2], mods: Modifiers) {
             let document = app.session.active().map(|s| s.doc.id).unwrap_or(DocId(0));
             let current = Selection { document, layer, path, point };
             if let Some(first) = app.ui.sailine_combine_first.take() {
-                if first.layer == current.layer && first.path != current.path {
+                if first.layer == current.layer {
                     match app.run("linework.combinePaths",json!({"layer":current.layer.0,"pathA":first.path,"pointA":first.point,"pathB":current.path,"pointB":current.point,"interpolation":interpolation_id()})) {
-                        Ok(_) => { app.ui.sailine_selection=None; app.ui.sailine_selections.clear(); }
+                        Ok(_) => { app.ui.sailine_selection=None; app.ui.sailine_selections.clear(); app.ui.status = if first.path == current.path { "SaiCombine: path closed" } else { "SaiCombine: paths combined" }.into(); }
                         Err(error) => { app.ui.status=error;app.ui.status_error=true; }
                     }
                 } else {
@@ -320,14 +318,13 @@ fn start_point_drag(app: &mut PhotocraftApp, selection: Selection, start: [f64; 
         origins,
         start,
         key: NEXT_DRAG.fetch_add(1, Ordering::Relaxed),
-        last_preview_at: None,
         pending_point: None,
         rendered_point: Some(start),
     });
     true
 }
 
-/// Shared point-edit shortcuts run before the active SaiLine tool's own click behavior.
+/// Shared point-edit shortcuts run before the active SaiLineArt tool's own click behavior.
 pub fn shared_pointer(app: &mut PhotocraftApp, ev: crate::canvas::ToolEvent, mods: Modifiers) -> bool {
     if !is_sailine_tool(app.ui.tool) {
         return false;
@@ -486,11 +483,6 @@ pub fn drag_to(app: &mut PhotocraftApp, point: [f64; 2]) -> bool {
     if drag.rendered_point == Some(point) {
         return true;
     }
-    let now = Instant::now();
-    if drag.last_preview_at.is_some_and(|last| now.duration_since(last) < Duration::from_millis(33)) {
-        return true;
-    }
-    drag.last_preview_at = Some(now);
     drag.rendered_point = Some(point);
     render_drag(app, point)
 }
@@ -766,7 +758,10 @@ pub fn commit(app: &mut PhotocraftApp) {
     sync(app);
     let Some(draft) = app.ui.sailine.as_ref().filter(|d| d.points.len() >= 2) else { return };
     let model = interpolation_id();
-    let params = json!({"points": draft.points, "width": app.ui.tool_options.sailine_width, "color": app.session.tools.foreground, "straight": draft.straight, "interpolation": model});
+    let brush_mode = app.ui.tool == Tool::SaiCurve && app.ui.tool_options.sailine_brush_mode && !draft.straight && draft.points.len() >= 3;
+    let factors: Vec<f32> =
+        (0..draft.points.len()).map(|index| if brush_mode && (index == 0 || index + 1 == draft.points.len()) { 0.0 } else { 1.0 }).collect();
+    let params = json!({"points": draft.points, "width": app.ui.tool_options.sailine_width, "color": app.session.tools.foreground, "straight": draft.straight, "interpolation": model, "widthFactors": factors});
     match app.run("linework.create", params) {
         Ok(_) => app.ui.sailine = None,
         Err(e) => {
@@ -837,6 +832,10 @@ fn draw_round_anchor(painter: &egui::Painter, center: egui::Pos2, selected: bool
 pub fn options(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
     let pressure_tool = app.ui.tool == Tool::SaiPressure;
     ui.label(app.ui.tool.label());
+    if app.ui.tool == Tool::SaiCurve {
+        ui.checkbox(&mut app.ui.tool_options.sailine_brush_mode, "Brush mode")
+            .on_hover_text("Taper the first and last points of curves with at least two segments to 0% pressure.");
+    }
     ui.label(tl!("Width:"));
     ui.add(egui::DragValue::new(&mut app.ui.tool_options.sailine_width).range(0.7..=30.0).suffix(" px"));
     if let Some(selection) = app.ui.sailine_selection
@@ -901,15 +900,48 @@ pub fn draw(app: &PhotocraftApp, painter: &egui::Painter, xf: &ViewXform) {
         if let Ok(path) = photocraft_vector::linework::interpolate_points_with_model_and_pointed(&points, handle, model, &pointed) {
             let color = screen_color(app.session.tools.foreground);
             let width = (app.ui.tool_options.sailine_width * xf.zoom).max(0.5);
-            for (curve, _) in crate::vector_ui::path_lines(&path, &to_screen) {
-                painter.add(egui::Shape::line(curve, Stroke::new(width, color)));
-            }
-            let radius = width * 0.5;
-            if let Some(start) = points.first() {
-                painter.circle_filled(to_screen(*start), radius, color);
-            }
-            if let Some(end) = points.last() {
-                painter.circle_filled(to_screen(*end), radius, color);
+            let brush = app.ui.tool == Tool::SaiCurve && app.ui.tool_options.sailine_brush_mode && !draft.straight && draft.points.len() >= 3;
+            if brush {
+                if let Some(subpath) = path.subpaths.first() {
+                    let segments = subpath.segments();
+                    for (index, segment) in segments.iter().enumerate() {
+                        let samples = crate::vector_ui::curve_points(
+                            [segment[0].x, segment[0].y],
+                            [segment[1].x, segment[1].y],
+                            [segment[2].x, segment[2].y],
+                            [segment[3].x, segment[3].y],
+                            &to_screen,
+                        );
+                        let start_factor = if index == 0 { 0.0 } else { 1.0 };
+                        let end_factor = if index + 1 == segments.len() { 0.0 } else { 1.0 };
+                        let factors: Vec<f32> = (0..samples.len())
+                            .map(|i| start_factor + (end_factor - start_factor) * i as f32 / samples.len().saturating_sub(1).max(1) as f32)
+                            .collect();
+                        for (pair, factor_pair) in samples.windows(2).zip(factors.windows(2)) {
+                            let stroke_width = width * (factor_pair[0] + factor_pair[1]) * 0.5;
+                            if stroke_width > 0.05 {
+                                painter.line_segment([pair[0], pair[1]], Stroke::new(stroke_width, color));
+                            }
+                        }
+                        for (point, factor) in samples.iter().zip(factors) {
+                            let radius = width * factor * 0.5;
+                            if radius > 0.05 {
+                                painter.circle_filled(*point, radius, color);
+                            }
+                        }
+                    }
+                }
+            } else {
+                for (curve, _) in crate::vector_ui::path_lines(&path, &to_screen) {
+                    painter.add(egui::Shape::line(curve, Stroke::new(width, color)));
+                }
+                let radius = width * 0.5;
+                if let Some(start) = points.first() {
+                    painter.circle_filled(to_screen(*start), radius, color);
+                }
+                if let Some(end) = points.last() {
+                    painter.circle_filled(to_screen(*end), radius, color);
+                }
             }
         }
         let accent = Tokens::get(painter.ctx()).accent;
@@ -933,14 +965,18 @@ pub fn draw(app: &PhotocraftApp, painter: &egui::Painter, xf: &ViewXform) {
             .collect();
         let modifiers = painter.ctx().input(|input| input.modifiers);
         let modifier_edit = modifiers.alt || modifiers.shift || modifiers.ctrl;
-        let show_handles = modifier_edit || app.ui.sailine_selection_box.is_some();
+        let pressure_tool = app.ui.tool == Tool::SaiPressure;
+        let pointed_tool = app.ui.tool == Tool::SaiPointed;
+        let combine_tool = app.ui.tool == Tool::SaiCombine;
+        let show_handles = pressure_tool || pointed_tool || combine_tool || modifier_edit || app.ui.sailine_selection_box.is_some();
         let hovered = app.hover_doc.and_then(|point| nearest_point(app, point));
         let accent = Tokens::get(painter.ctx()).accent;
         let multiple_selection = selected.iter().filter(|(selected_layer, _, _)| *selected_layer == layer.id).count() > 1;
         let selected_color = if multiple_selection { egui::Color32::from_rgb(245, 42, 42) } else { accent };
         let hovered_segment = app.hover_doc.and_then(|point| nearest_segment(app, point));
-        if modifier_edit
-            && let Some((_, path_id, _, _, _)) = hovered_segment
+        let hovered_path = hovered_segment.map(|(_, path, _, _, _)| path).or_else(|| hovered.map(|(_, path, _)| path));
+        if (modifier_edit || pressure_tool)
+            && let Some(path_id) = hovered_path
             && let Some(path) = linework.paths.iter().find(|path| path.id == path_id)
         {
             let points: Vec<_> = path.points.iter().map(|point| point.position).collect();
@@ -1011,7 +1047,9 @@ pub fn draw(app: &PhotocraftApp, painter: &egui::Painter, xf: &ViewXform) {
                     let is_selected = selected.contains(&(layer.id, path.id, candidate.id));
                     let is_hovered = hovered
                         .is_some_and(|(hover_layer, hover_path, hover_point)| hover_layer == layer.id && hover_path == path.id && hover_point == candidate.id);
-                    if is_selected || is_hovered || modifiers.alt || modifiers.shift || modifiers.ctrl {
+                    let is_endpoint = candidate.id == path.points.first().map_or(0, |point| point.id)
+                        || candidate.id == path.points.last().map_or(0, |point| point.id);
+                    if pressure_tool || pointed_tool || combine_tool && is_endpoint || is_selected || is_hovered || modifiers.alt || modifiers.shift || modifiers.ctrl {
                         draw_round_anchor(painter, to_screen(candidate.position), is_selected, if is_selected { selected_color } else { accent });
                     }
                 }
@@ -1099,6 +1137,33 @@ mod tests {
         match &app.session.active().unwrap().doc.layer(layer).unwrap().content {
             photocraft_doc::LayerContent::Linework(lw) => lw.paths.iter().find(|p| p.id == path).unwrap().points.len(),
             _ => 0,
+        }
+    }
+
+    #[test]
+    fn curve_brush_mode_tapers_only_multi_segment_endpoints() {
+        for (point_count, brush_mode, expected) in [(3, true, vec![0.0, 1.0, 0.0]), (2, true, vec![1.0, 1.0]), (3, false, vec![1.0, 1.0, 1.0])] {
+            let mut app = app();
+            app.ui.tool_options.sailine_brush_mode = brush_mode;
+            for index in 0..point_count {
+                click(&mut app, 20.0 + index as f64 * 40.0, 40.0 + (index % 2) as f64 * 20.0);
+            }
+            commit(&mut app);
+            let linework = app
+                .session
+                .active()
+                .unwrap()
+                .doc
+                .layers
+                .iter()
+                .find_map(|layer| match &layer.content {
+                    photocraft_doc::LayerContent::Linework(linework) => Some(linework),
+                    _ => None,
+                })
+                .expect("created linework layer");
+            let factors: Vec<f32> = linework.paths[0].points.iter().map(|point| point.width_factor).collect();
+            assert_eq!(factors, expected);
+            assert!((linework.paths[0].width - app.ui.tool_options.sailine_width).abs() < f32::EPSILON);
         }
     }
 
@@ -1208,6 +1273,21 @@ mod tests {
     }
 
     #[test]
+    fn combine_tool_closes_a_path_by_joining_its_own_endpoints() {
+        let mut app = app();
+        app.run("linework.create", json!({"points":[[20,40],[100,100],[180,40]],"width":4})).unwrap();
+        let layer = app.session.active().unwrap().active_layer.unwrap();
+        app.ui.tool = Tool::SaiCombine;
+        click(&mut app, 20.0, 40.0);
+        assert!(app.ui.sailine_combine_first.is_some());
+        click(&mut app, 180.0, 40.0);
+        let photocraft_doc::LayerContent::Linework(linework) = &app.session.active().unwrap().doc.layer(layer).unwrap().content else { panic!() };
+        assert_eq!(linework.paths.len(), 1);
+        assert!(linework.paths[0].closed);
+        assert!(app.ui.sailine_combine_first.is_none());
+    }
+
+    #[test]
     fn settings_keep_width_but_never_restore_a_previous_sessions_draft() {
         let mut app = app();
         click(&mut app, 20.0, 30.0);
@@ -1245,6 +1325,120 @@ mod tests {
     }
 
     #[test]
+    fn pressure_tool_keeps_all_anchors_visible_and_shows_hovered_skeleton() {
+        let mut app = app();
+        app.run("linework.create", json!({"points": [[20.0, 50.0], [180.0, 50.0]], "width": 4.0})).unwrap();
+        app.ui.tool = Tool::SaiPressure;
+        let xf = crate::canvas::ViewXform {
+            rect: egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(200.0, 200.0)),
+            zoom: 1.0,
+            center: [100.0, 100.0],
+            flip: false,
+            rotation: 0.0,
+            aspect: 1.0,
+        };
+        let ctx = egui::Context::default();
+        let paint = |app: &PhotocraftApp| {
+            let mut output = ctx.run_ui(egui::RawInput::default(), |ui| draw(app, &ui.painter(), &xf));
+            output.textures_delta.clear();
+            output.shapes
+        };
+
+        app.hover_doc = None;
+        let shapes = paint(&app);
+        for point in [[20.0, 50.0], [180.0, 50.0]] {
+            let center = xf.to_screen(point[0] as f32, point[1] as f32);
+            assert!(
+                shapes.iter().any(|clipped| matches!(&clipped.shape,
+                    egui::Shape::Circle(circle) if circle.center == center && circle.radius == 3.5
+                )),
+                "anchor at {point:?} should remain visible without hover or modifiers"
+            );
+        }
+
+        app.hover_doc = Some([90.0, 50.0]);
+        let shapes = paint(&app);
+        assert!(
+            shapes.iter().any(|clipped| matches!(&clipped.shape,
+                egui::Shape::Path(path) if (path.stroke.width - 1.25).abs() < f32::EPSILON
+            )),
+            "hovering the path with SaiPressure should reveal its centerline skeleton"
+        );
+    }
+
+    #[test]
+    fn pointed_tool_keeps_all_anchors_and_combine_keeps_only_endpoints_visible() {
+        let mut app = app();
+        app.run("linework.create", json!({"points":[[20.0,50.0],[100.0,100.0],[180.0,50.0]],"width":4.0})).unwrap();
+        let xf = crate::canvas::ViewXform {
+            rect: egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(200.0, 200.0)),
+            zoom: 1.0,
+            center: [100.0, 100.0],
+            flip: false,
+            rotation: 0.0,
+            aspect: 1.0,
+        };
+        let ctx = egui::Context::default();
+        let paint = |app: &PhotocraftApp| {
+            let mut output = ctx.run_ui(egui::RawInput::default(), |ui| draw(app, &ui.painter(), &xf));
+            output.textures_delta.clear();
+            output.shapes
+        };
+        let has_anchor = |shapes: &[egui::epaint::ClippedShape], point: [f64; 2]| {
+            let center = xf.to_screen(point[0] as f32, point[1] as f32);
+            shapes.iter().any(|clipped| matches!(&clipped.shape,
+                egui::Shape::Circle(circle) if circle.center == center && circle.radius == 3.5
+            ))
+        };
+        app.ui.tool = Tool::SaiPointed;
+        let shapes = paint(&app);
+        for point in [[20.0, 50.0], [100.0, 100.0], [180.0, 50.0]] {
+            assert!(has_anchor(&shapes, point), "SaiPointed keeps anchor {point:?} visible");
+        }
+        app.ui.tool = Tool::SaiCombine;
+        let shapes = paint(&app);
+        assert!(has_anchor(&shapes, [20.0, 50.0]));
+        assert!(has_anchor(&shapes, [180.0, 50.0]));
+        assert!(!has_anchor(&shapes, [100.0, 100.0]), "SaiCombine only advertises connectable endpoints");
+    }
+
+    #[test]
+    fn rapid_curve_clicks_queued_in_one_frame_are_all_recorded() {
+        let mut app = app();
+        app.sync_views();
+        let mut view = app.ui.views[0].clone();
+        view.zoom = 1.0;
+        view.center = [100.0, 100.0];
+        view.fit_pending = false;
+        view.fill_pending = false;
+        let ctx = egui::Context::default();
+        let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(200.0, 200.0));
+        let frame = |app: &mut PhotocraftApp, events: Vec<egui::Event>, view: &mut crate::state::View| {
+            let input = egui::RawInput { screen_rect: Some(rect), events, ..Default::default() };
+            let mut output = ctx.run_ui(input, |ui| {
+                *view = crate::canvas::canvas_view(app, ui, 0, rect, view.clone(), true);
+            });
+            output.textures_delta.clear();
+        };
+        frame(&mut app, Vec::new(), &mut view);
+
+        // A fast mouse can deliver several complete click cycles before egui draws another frame.
+        // Exercise the real canvas event path, not just the SaiLineArt state machine.
+        let positions = [[24.0, 31.0], [62.0, 82.0], [109.0, 46.0], [171.0, 128.0], [184.0, 53.0]];
+        let mut events = Vec::new();
+        for [x, y] in positions {
+            let at = egui::pos2(x as f32, y as f32);
+            events.push(egui::Event::PointerMoved(at));
+            events.push(egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::NONE });
+            events.push(egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed: false, modifiers: egui::Modifiers::NONE });
+        }
+        frame(&mut app, events, &mut view);
+
+        let draft = app.ui.sailine.as_ref().expect("rapid clicks start a curve draft");
+        assert_eq!(draft.points, positions.map(|[x, y]| [x, y]));
+    }
+
+    #[test]
     fn shift_selects_multiple_points_and_ctrl_drag_moves_them_together() {
         let mut app = app();
         app.run("linework.create", json!({"points": [[20.0, 30.0], [100.0, 140.0], [170.0, 40.0]], "width": 3.0})).unwrap();
@@ -1262,16 +1456,18 @@ mod tests {
     }
 
     #[test]
-    fn throttled_point_drag_commits_exact_release_position() {
+    fn point_drag_previews_each_pointer_position_and_commits_the_latest() {
         let mut app = app();
         app.run("linework.create", json!({"points": [[20.0, 30.0], [100.0, 140.0]], "width": 3.0})).unwrap();
+        let layer = app.session.active().unwrap().active_layer.unwrap();
         assert!(begin_drag(&mut app, [20.0, 30.0]));
         assert!(drag_to(&mut app, [30.0, 40.0]));
+        let photocraft_doc::LayerContent::Linework(linework) = &app.session.active().unwrap().doc.layer(layer).unwrap().content else { panic!("linework expected") };
+        assert_eq!(linework.paths[0].points[0].position, [30.0, 40.0], "the first pointer update is visible immediately");
         assert!(drag_to(&mut app, [45.0, 55.0]));
+        let photocraft_doc::LayerContent::Linework(linework) = &app.session.active().unwrap().doc.layer(layer).unwrap().content else { panic!("linework expected") };
+        assert_eq!(linework.paths[0].points[0].position, [45.0, 55.0], "the next update replaces the preview instead of waiting for a throttle interval");
         end_drag(&mut app);
-        let layer = app.session.active().unwrap().doc.layer(app.session.active().unwrap().active_layer.unwrap()).unwrap();
-        let photocraft_doc::LayerContent::Linework(linework) = &layer.content else { panic!("linework expected") };
-        assert_eq!(linework.paths[0].points[0].position, [45.0, 55.0]);
         assert!(app.session.undo());
         let layer = app.session.active().unwrap().doc.layer(app.session.active().unwrap().active_layer.unwrap()).unwrap();
         let photocraft_doc::LayerContent::Linework(linework) = &layer.content else { panic!("linework expected") };
@@ -1440,6 +1636,108 @@ mod tests {
             _ => panic!("linework expected"),
         };
         assert_eq!(factor, latest);
+    }
+
+    #[test]
+    #[ignore = "headless interactive SaiLineArt drag profiling; run with --release --ignored --nocapture"]
+    fn sailine_single_point_drag_pipeline_bench() {
+        let mut app = app();
+        app.run("linework.create", json!({"points": [[20.0, 35.0], [100.0, 120.0], [180.0, 45.0]], "width": 3.0})).unwrap();
+        app.ui.tool = Tool::SaiCurve;
+        assert!(begin_drag(&mut app, [100.0, 120.0]));
+        let measure = |mut operation: Box<dyn FnMut()>| {
+            let mut samples = Vec::with_capacity(63);
+            for index in 0..63 {
+                let start = Instant::now();
+                operation();
+                if index >= 3 {
+                    samples.push(start.elapsed().as_secs_f64() * 1000.0);
+                }
+            }
+            samples.sort_by(f64::total_cmp);
+            [samples[samples.len() / 2], samples[(samples.len() * 95) / 100], samples[samples.len() - 1]]
+        };
+        let mut event_ms = Vec::new();
+        for i in 0..63 {
+            let start = Instant::now();
+            tool_event(
+                &mut app,
+                ToolEvent::Move { x: 100.0 + (i % 7) as f64, y: 120.0 + (i % 5) as f64, pressure: 1.0 },
+                Modifiers::CTRL,
+            );
+            let elapsed = start.elapsed().as_secs_f64() * 1000.0;
+            if i >= 3 {
+                event_ms.push(elapsed);
+            }
+        }
+        end_drag(&mut app);
+        event_ms.sort_by(f64::total_cmp);
+        let percentile = |fraction: f64| {
+            let index = (fraction * (event_ms.len() - 1) as f64).round() as usize;
+            event_ms[index]
+        };
+        let points = [[20.0, 35.0], [100.0, 120.0], [180.0, 45.0]];
+        let factors = [1.0; 3];
+        let pointed = [false; 3];
+        let geometry = measure(Box::new(|| {
+            std::hint::black_box(photocraft_vector::linework::interpolate_points_with_model_and_pointed(
+                &points,
+                None,
+                photocraft_vector::linework::InterpolationModel::SaiSimplified,
+                &pointed,
+            )
+            .unwrap());
+        }));
+        let contour_shape = photocraft_vector::linework::variable_width_shape_with_model_and_pointed(
+            &points,
+            &factors,
+            3.0,
+            photocraft_color::Color::BLACK,
+            None,
+            photocraft_vector::linework::InterpolationModel::SaiSimplified,
+            &pointed,
+        )
+        .unwrap();
+        let contour = measure(Box::new(|| {
+            std::hint::black_box(photocraft_vector::linework::variable_width_shape_with_model_and_pointed(
+                &points,
+                &factors,
+                3.0,
+                photocraft_color::Color::BLACK,
+                None,
+                photocraft_vector::linework::InterpolationModel::SaiSimplified,
+                &pointed,
+            )
+            .unwrap());
+        }));
+        let raster = measure(Box::new(|| {
+            std::hint::black_box(photocraft_vector::render_shape(
+                &contour_shape,
+                photocraft_color::PixelFormat::RGBA32F,
+                photocraft_geom::Rect::new(0, 0, 200, 200),
+            ));
+        }));
+        app.hover_doc = Some([100.0, 120.0]);
+        let context = egui::Context::default();
+        let xform = ViewXform {
+            rect: egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(200.0, 200.0)),
+            zoom: 1.0,
+            center: [100.0, 100.0],
+            flip: false,
+            rotation: 0.0,
+            aspect: 1.0,
+        };
+        let overlay = measure(Box::new(|| {
+            let input = egui::RawInput { events: vec![egui::Event::ModifiersChanged(Modifiers::CTRL)], ..Default::default() };
+            let mut output = context.run_ui(input, |ui| draw(&app, &ui.painter(), &xform));
+            std::hint::black_box(&output.shapes);
+            output.textures_delta.clear();
+        }));
+        println!(
+            "SAILINE_DRAG_BENCH {{\"iterations\":{},\"event_command_ms\":{{\"median\":{:.6},\"p95\":{:.6},\"max\":{:.6}}},\"geometry_ms\":{{\"median\":{:.6},\"p95\":{:.6},\"max\":{:.6}}},\"contour_ms\":{{\"median\":{:.6},\"p95\":{:.6},\"max\":{:.6}}},\"raster_ms\":{{\"median\":{:.6},\"p95\":{:.6},\"max\":{:.6}}},\"overlay_paint_cpu_ms\":{{\"median\":{:.6},\"p95\":{:.6},\"max\":{:.6}}}}}",
+            event_ms.len(), percentile(0.5), percentile(0.95), event_ms[event_ms.len() - 1],
+            geometry[0], geometry[1], geometry[2], contour[0], contour[1], contour[2], raster[0], raster[1], raster[2], overlay[0], overlay[1], overlay[2]
+        );
     }
 
     #[test]

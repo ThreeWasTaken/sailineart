@@ -810,6 +810,31 @@ fn pointer_moves(events: &[egui::Event], button: egui::PointerButton, down_at_st
     out
 }
 
+/// Detect several complete primary-button gestures queued before egui gets another frame. A
+/// response only exposes one `drag_started` position, so tools that act on click can otherwise
+/// lose all but the last click in a fast batch.
+fn has_batched_primary_clicks(events: &[egui::Event], rect: Rect) -> bool {
+    let mut down = false;
+    let mut presses = 0;
+    for event in events {
+        if let egui::Event::PointerButton { pos, button: PointerButton::Primary, pressed, .. } = event {
+            if *pressed {
+                if down || !rect.contains(*pos) {
+                    return false;
+                }
+                down = true;
+                presses += 1;
+            } else {
+                if !down {
+                    return false;
+                }
+                down = false;
+            }
+        }
+    }
+    presses > 1 && !down
+}
+
 /// Modifiers attached to the pointer event itself. Some input sources provide these without a
 /// separate `ModifiersChanged` event, so use them for click gestures before falling back to the
 /// frame-wide modifier state.
@@ -1136,7 +1161,7 @@ pub(crate) fn display_doc(app: &mut PhotocraftApp, idx: usize) -> (std::sync::Ar
         && app.session.active_index() == Some(idx)
         && st.doc.layer(photocraft_doc::LayerId(t.layer)).is_some()
     {
-        // SaiLine transforms update the selected control points in the live document on every
+        // SaiLineArt transforms update the selected control points in the live document on every
         // drag preview. Unlike raster transforms, they do not have a separately warped texture;
         // displaying `pv.doc` here would keep the canvas frozen at the transform's start state.
         if crate::transform_tool::is_sailine_points_preview(pv) {
@@ -3454,6 +3479,34 @@ pub fn canvas_view(app: &mut PhotocraftApp, ui: &mut egui::Ui, idx: usize, rect:
         // A drag is only recognised once the pointer has moved past egui's click distance: the
         // gesture starts where the button went down, not where it is now (#123).
         let gesture_active_before = app.drag.is_some();
+        let sailine_click_batch = matches!(tool, Tool::SaiCurve | Tool::SaiStraight)
+            && !gesture_active_before
+            && app.ui.sailine_point_drag.is_none()
+            && ui.input(|i| has_batched_primary_clicks(&i.events, rect));
+        if sailine_click_batch {
+            let events = ui.input(|i| i.events.clone());
+            let mut down = false;
+            for event in events {
+                match event {
+                    egui::Event::PointerButton { pos, button: PointerButton::Primary, pressed: true, modifiers } => {
+                        down = true;
+                        let d = xf.to_doc(pos);
+                        tool_event(app, ToolEvent::Down { x: d[0], y: d[1], pressure: app.stylus.pressure() }, modifiers);
+                    }
+                    egui::Event::PointerMoved(pos) if down => {
+                        let d = xf.to_doc(pos);
+                        tool_event(app, ToolEvent::Move { x: d[0], y: d[1], pressure: app.stylus.pressure() }, mods);
+                    }
+                    egui::Event::PointerButton { pos, button: PointerButton::Primary, pressed: false, .. } if down => {
+                        down = false;
+                        let d = xf.to_doc(pos);
+                        tool_event(app, ToolEvent::Up { x: d[0], y: d[1] }, mods);
+                    }
+                    _ => {}
+                }
+            }
+            (buttons.started, buttons.dragged, buttons.stopped, buttons.clicked) = (false, false, false, false);
+        }
         // Stroke timing: egui's events carry no timestamps, so a press takes the frame time and
         // the moves below are spread between the previous point and this frame (`spread_ms`).
         let now_ms = ui.input(|i| i.time) * 1000.0;
@@ -4945,7 +4998,7 @@ pub fn tool_event(app: &mut PhotocraftApp, ev: ToolEvent, mods: egui::Modifiers)
     }
     // Window › Modifier Keys: sticky Shift/⌘/⌥ act as held keys.
     let mods = crate::workspace_ui::sticky_mods(app, mods);
-    // SaiLine point edits are tool-independent and take priority over each tool's click action.
+    // SaiLineArt point edits are tool-independent and take priority over each tool's click action.
     // Ctrl+T remains owned by the transform tool above this shared pointer handler.
     if crate::sailine_ui::shared_pointer(app, ev, mods) {
         return;

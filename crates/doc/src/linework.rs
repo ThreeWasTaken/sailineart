@@ -1,4 +1,4 @@
-//! Persistent, UI-independent data for SaiLine.
+//! Persistent, UI-independent data for SaiLineArt.
 //!
 //! The point list is the source of truth. Bézier handles, raster caches and screen-space
 //! previews are derived by higher layers. Keeping this module in the document crate makes the
@@ -21,7 +21,7 @@ fn fresh_id() -> u64 {
     NEXT_LINEWORK_ID.fetch_add(1, Ordering::Relaxed)
 }
 
-/// A logical SaiLine point. Width is a multiplicative factor on the path's nominal width.
+/// A logical SaiLineArt point. Width is a multiplicative factor on the path's nominal width.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct LineworkPoint {
     pub id: u64,
@@ -53,14 +53,14 @@ impl LineworkPoint {
     }
 }
 
-/// One open or closed logical SaiLine stroke.
+/// One open or closed logical SaiLineArt stroke.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct LineworkPath {
     pub id: u64,
     pub points: Vec<LineworkPoint>,
     pub color: Color,
     pub width: f32,
-    /// Optional SaiLine live handle at the last point, stored in document coordinates.
+    /// Optional SaiLineArt live handle at the last point, stored in document coordinates.
     #[serde(default)]
     pub handle: Option<[f64; 2]>,
     #[serde(default)]
@@ -121,7 +121,7 @@ impl LineworkPathCache {
     }
 }
 
-/// A persistent SaiLine layer containing multiple independent strokes.
+/// A persistent SaiLineArt layer containing multiple independent strokes.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct LineworkLayer {
     pub paths: Vec<LineworkPath>,
@@ -183,7 +183,11 @@ impl LineworkLayer {
     }
 
     pub fn duplicate(&self) -> Self {
-        Self { paths: self.paths.iter().map(LineworkPath::duplicate).collect(), cache: self.cache.clone(), path_caches: Default::default() }
+        Self {
+            paths: self.paths.iter().map(LineworkPath::duplicate).collect(),
+            cache: self.cache.clone(),
+            path_caches: Default::default(),
+        }
     }
 }
 

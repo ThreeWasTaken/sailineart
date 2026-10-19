@@ -31,6 +31,7 @@ next to them.
 | `assets/icons/slice-knife.svg` | Slice tool glyph | PhotoCraft contributors | Original work | MIT OR Apache-2.0 |
 | `assets/icons/sampler.svg` | Color Sampler tool glyph: a target reticle marking a sampled pixel | PhotoCraft contributors | Original work | MIT OR Apache-2.0 |
 | `assets/icons/convert-point.svg` | Convert Point tool glyph: an angle with a square anchor on its apex, drawn on Lucide's 24 px grid and stroke | PhotoCraft contributors | Original work | MIT OR Apache-2.0 |
+| `assets/icons/sai-{color,combine,curve,line,pointed,pressure,weight}.svg` | SaiLineArt tool glyphs | SaiLineArt project owner | Original SVG artwork supplied for SaiLineArt | MIT OR Apache-2.0 |
 | `assets/icons/artboard.svg` | Artboard tool glyph: a board with a tick at each end of its edges | PhotoCraft contributors | Original work | MIT OR Apache-2.0 |
 | `assets/icons/perspective-crop.svg` | Perspective Crop tool glyph: a crop frame in perspective with its grid and crop-mark ticks | PhotoCraft contributors | Original work | MIT OR Apache-2.0 |
 | `assets/icons/type-mask.svg`, `assets/icons/type-mask-vertical.svg` | Horizontal and Vertical Type Mask tool glyphs: a T drawn as marching ants (the vertical one beside a downward arrow), on Lucide's 24 px grid and stroke | PhotoCraft contributors | Original work | MIT OR Apache-2.0 |
