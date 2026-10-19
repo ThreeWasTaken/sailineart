@@ -38,14 +38,15 @@ fn kind_blocks(id: &str, l: &Layer) -> bool {
     let c = &l.content;
     match id {
         "layer.rasterize.type" | "layer.rasterize.rasterizeType" => !matches!(c, LayerContent::Text(_)),
-        "layer.rasterize.shape" | "layer.rasterize.rasterizeShape" => !matches!(c, LayerContent::Shape(_)),
+        "layer.rasterize.shape" | "layer.rasterize.rasterizeShape" => !matches!(c, LayerContent::Shape(_) | LayerContent::Linework(_)),
         "layer.rasterize.fillContent" => !matches!(c, LayerContent::Fill(_)),
         "layer.rasterize.smartObject" => !matches!(c, LayerContent::Smart(_)),
         "layer.rasterize.vectorMask" => l.vector_mask.is_none(),
-        // What the command converts: type, shape, fill and Smart Object layers, and vector masks
+        // What the command converts: type, shape/Linework, fill and Smart Object layers, and vector masks
         // ("all vector data"). Effects stay live: Rasterize › Layer Style bakes them.
         "layer.rasterize.layer" => {
-            l.vector_mask.is_none() && !matches!(c, LayerContent::Text(_) | LayerContent::Shape(_) | LayerContent::Fill(_) | LayerContent::Smart(_))
+            l.vector_mask.is_none()
+                && !matches!(c, LayerContent::Text(_) | LayerContent::Shape(_) | LayerContent::Linework(_) | LayerContent::Fill(_) | LayerContent::Smart(_))
         }
         "layer.rasterize.layerStyle" => !photocraft_engine::rasterize_style_cmds::can_bake(l),
         "layer.layerStyle.copyLayerStyle" | "layer.layerStyle.clear" => l.effects.items.is_empty(),
@@ -226,6 +227,17 @@ mod tests {
         for id in ["layer.layerStyle.dropShadow", "layer.mergeDown", "layer.rasterize.vectorMask"] {
             assert_eq!(sel(&s, &ids, id), disabled_for(&st.doc, active, id), "{id}: decided by the active layer, as before");
         }
+    }
+
+    #[test]
+    fn linework_rasterize_is_enabled_for_the_context_menu_action() {
+        let mut s = session();
+        let id = s.execute("linework.create", json!({"points": [[2, 3], [16, 15]], "width": 3})).unwrap()["layer"].as_u64().unwrap();
+        assert_eq!(s.active().unwrap().active_layer, Some(photocraft_doc::LayerId(id)));
+        assert!(!off(&s, "layer.rasterize.layer"));
+        assert!(!off(&s, "layer.rasterize.shape"));
+        s.execute("layer.rasterize.layer", json!({"layer": id})).unwrap();
+        assert!(matches!(s.active().unwrap().doc.layer(photocraft_doc::LayerId(id)).unwrap().content, LayerContent::Raster(_)));
     }
 
     /// A document with a Background, plain layers, one with a mask, one with a vector mask, a type layer, a shape, a Smart

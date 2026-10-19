@@ -679,7 +679,7 @@ pub(crate) fn kind_of(s: &Session, id: LayerId) -> Option<&'static str> {
     let d = s.active()?;
     Some(match &d.doc.layer(id)?.content {
         LayerContent::Text(_) => "type",
-        LayerContent::Shape(_) => "shape",
+        LayerContent::Shape(_) | LayerContent::Linework(_) => "shape",
         LayerContent::Fill(_) => "fill",
         LayerContent::Smart(_) => "smart",
         _ => return None,

@@ -277,6 +277,33 @@ fn shape_rasterize_keeps_pixels() {
 }
 
 #[test]
+fn linework_rasterize_bakes_the_same_render_and_rebuilds_missing_cache() {
+    let mut s = session(96, 64, 8);
+    let id = s.execute("linework.create", json!({"points": [[8, 12], [44, 48], [86, 15]], "width": 9, "color": "#d02040"})).unwrap()["layer"].as_u64().unwrap();
+    let expected = match &doc(&s).layer(LayerId(id)).unwrap().content {
+        LayerContent::Linework(linework) => linework.cache.clone().unwrap(),
+        _ => panic!("expected Linework layer"),
+    };
+
+    // Linework caches are transient and absent after a document reload. Rasterize must rebuild
+    // pixels from canonical points, then use the normal vector-layer rasterize replacement.
+    let mutable_doc = std::sync::Arc::make_mut(&mut s.active_mut().unwrap().doc);
+    if let LayerContent::Linework(linework) = &mut mutable_doc.layer_mut(LayerId(id)).unwrap().content {
+        linework.cache = None;
+        linework.path_caches.clear();
+    }
+    s.execute("layer.rasterize.shape", json!({"layer": id})).unwrap();
+
+    let layer = doc(&s).layer(LayerId(id)).unwrap();
+    assert!(matches!(layer.content, LayerContent::Raster(_)));
+    assert_eq!(layer.surface().unwrap(), &expected);
+    assert!(s.execute("edit.undo", json!({})).is_ok());
+    assert!(matches!(doc(&s).layer(LayerId(id)).unwrap().content, LayerContent::Linework(_)));
+    assert!(s.execute("edit.redo", json!({})).is_ok());
+    assert!(matches!(doc(&s).layer(LayerId(id)).unwrap().content, LayerContent::Raster(_)));
+}
+
+#[test]
 fn paths_set_rename_delete_list() {
     let mut s = session(100, 100, 8);
     let tri = json!({"subpaths": [{"knots": [[10, 10], [90, 10], [50, 90]]}]});

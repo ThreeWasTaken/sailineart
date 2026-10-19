@@ -755,20 +755,30 @@ fn shape_edit(s: &mut Session, p: &Value) -> Result<Value> {
 
 fn shape_rasterize(s: &mut Session, p: &Value) -> Result<Value> {
     let id = layer_id(s, p)?;
-    s.edit("Rasterize Shape", |doc, _| {
+    let is_linework = s.active().and_then(|state| state.doc.layer(id)).is_some_and(|layer| matches!(layer.content, LayerContent::Linework(_)));
+    s.edit(if is_linework { "Rasterize Linework" } else { "Rasterize Shape" }, |doc, _| {
+        if is_linework {
+            crate::linework_cmds::ensure_rendered(doc, id)?;
+        }
         let snapshot = doc.clone();
         let l = doc.layer_mut(id).ok_or(EngineError::NoLayer(id))?;
-        let LayerContent::Shape(sh) = &mut l.content else {
-            return Err(EngineError::Other(format!("layer {} is not a shape layer", id.0)));
+        let surface = match &mut l.content {
+            LayerContent::Shape(sh) => {
+                if sh.cache.is_none() {
+                    refresh_shape(&snapshot, sh);
+                }
+                sh.cache.take()
+            }
+            LayerContent::Linework(linework) => linework.cache.take(),
+            _ => return Err(EngineError::Other(format!("layer {} is not a shape or Linework layer", id.0))),
         };
-        if sh.cache.is_none() {
-            refresh_shape(&snapshot, sh);
-        }
         let fmt = snapshot.pixel_format();
-        let surface = sh.cache.take().unwrap_or_else(|| photocraft_raster::Surface::new(fmt));
+        let surface = surface.unwrap_or_else(|| photocraft_raster::Surface::new(fmt));
         let surface = if surface.format() == fmt { surface } else { surface.convert(fmt) };
         l.content = LayerContent::Raster(surface);
-        l.psd_blocks.retain(|(k, _)| !SHAPE_BLOCKS.contains(&k));
+        if !is_linework {
+            l.psd_blocks.retain(|(k, _)| !SHAPE_BLOCKS.contains(&k));
+        }
         Ok(())
     })?;
     Ok(json!({ "layer": id.0 }))

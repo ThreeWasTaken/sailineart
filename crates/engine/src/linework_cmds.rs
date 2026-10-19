@@ -235,6 +235,21 @@ fn refresh_linework_cache(
     Ok(())
 }
 
+/// Rebuild the transient Linework render cache before operations that need its pixel output.
+/// The canonical point data stays untouched; a missing cache (for example after loading a
+/// document) is rendered with SaiLine's production interpolation model.
+pub(crate) fn ensure_rendered(doc: &mut photocraft_doc::Document, layer_id: photocraft_doc::LayerId) -> Result<()> {
+    let path_ids = {
+        let layer = doc.layer(layer_id).ok_or(EngineError::NoLayer(layer_id))?;
+        let LayerContent::Linework(linework) = &layer.content else { return Ok(()) };
+        if linework.cache.is_some() {
+            return Ok(());
+        }
+        linework.paths.iter().map(|path| path.id).collect::<Vec<_>>()
+    };
+    refresh_linework_cache(doc, layer_id, &path_ids, vector::linework::InterpolationModel::SaiSimplified)
+}
+
 fn create(s: &mut Session, p: &Value) -> Result<Value> {
     let model = interpolation(p, CMD)?;
     let points = points(p)?;
