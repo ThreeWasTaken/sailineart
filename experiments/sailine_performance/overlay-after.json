@@ -1,0 +1,33 @@
+{
+  "optimization": "test-profile; override CARGO_PROFILE_TEST_PACKAGE_PHOTOCRAFT_UI_EGUI_OPT_LEVEL=3 for optimized UI",
+  "rows": [
+    {
+      "hovered_pressure_overlay_ms": {
+        "iterations": 20,
+        "max_ms": 0.01256,
+        "median_ms": 0.009899999999999999,
+        "p95_ms": 0.0123985
+      },
+      "points": 10
+    },
+    {
+      "hovered_pressure_overlay_ms": {
+        "iterations": 20,
+        "max_ms": 0.06852,
+        "median_ms": 0.06462,
+        "p95_ms": 0.066183
+      },
+      "points": 100
+    },
+    {
+      "hovered_pressure_overlay_ms": {
+        "iterations": 20,
+        "max_ms": 0.624061,
+        "median_ms": 0.61561,
+        "p95_ms": 0.6204985000000001
+      },
+      "points": 1000
+    }
+  ],
+  "schema": "sailine-overlay-bench-v1"
+}

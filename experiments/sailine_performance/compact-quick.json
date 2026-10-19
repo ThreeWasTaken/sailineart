@@ -1,0 +1,145 @@
+{
+  "arch": "x86_64",
+  "cache_bounds": "content",
+  "case_index": null,
+  "cpu_model": "AMD Ryzen 7 5800X 8-Core Processor",
+  "git_commit": "ac2b2ba121abdce0171af9fb0de179e95207ff35",
+  "optimization": "release",
+  "os": "linux",
+  "peak_rss_kib": 38352,
+  "profile": "quick",
+  "repetitions": 20,
+  "rows": [
+    {
+      "canvas": [
+        512,
+        512
+      ],
+      "contour_build_ms": {
+        "iterations": 20,
+        "max_ms": 0.0193,
+        "median_ms": 0.015054999999999999,
+        "p95_ms": 0.015728000000000002
+      },
+      "edit_snapshot_clone_only_ms": {
+        "iterations": 20,
+        "max_ms": 0.00064,
+        "median_ms": 0.0005700000000000001,
+        "p95_ms": 0.0006115
+      },
+      "full_layer_rebuild_command_ms": {
+        "iterations": 20,
+        "max_ms": 10.664978,
+        "median_ms": 10.551333,
+        "p95_ms": 10.6584135
+      },
+      "geometry_ms": {
+        "iterations": 20,
+        "max_ms": 0.0007,
+        "median_ms": 0.00045,
+        "p95_ms": 0.0004910000000000001
+      },
+      "incremental_region_recomposition_ms": {
+        "iterations": 20,
+        "max_ms": 0.04152,
+        "median_ms": 0.038705,
+        "p95_ms": 0.0390785
+      },
+      "move_one_command_incremental_ms": {
+        "iterations": 20,
+        "max_ms": 1.2659539999999998,
+        "median_ms": 1.040423,
+        "p95_ms": 1.26388205
+      },
+      "move_selected_command_ms": {
+        "iterations": 20,
+        "max_ms": 11.19263,
+        "median_ms": 11.0718195,
+        "p95_ms": 11.184346000000001
+      },
+      "overlap": false,
+      "paths": 10,
+      "points_per_path": 10,
+      "pressure_command_incremental_ms": {
+        "iterations": 20,
+        "max_ms": 1.135004,
+        "median_ms": 1.0516379999999999,
+        "p95_ms": 1.09583455
+      },
+      "single_path_raster_ms": {
+        "iterations": 20,
+        "max_ms": 0.495161,
+        "median_ms": 0.411236,
+        "p95_ms": 0.45570750000000004
+      },
+      "total_points": 100
+    },
+    {
+      "canvas": [
+        1024,
+        1024
+      ],
+      "contour_build_ms": {
+        "iterations": 20,
+        "max_ms": 0.13204,
+        "median_ms": 0.12473999999999999,
+        "p95_ms": 0.13146144999999998
+      },
+      "edit_snapshot_clone_only_ms": {
+        "iterations": 20,
+        "max_ms": 0.0014500000000000001,
+        "median_ms": 0.00137,
+        "p95_ms": 0.001412
+      },
+      "full_layer_rebuild_command_ms": {
+        "iterations": 20,
+        "max_ms": 56.460049,
+        "median_ms": 51.5336165,
+        "p95_ms": 56.384353000000004
+      },
+      "geometry_ms": {
+        "iterations": 20,
+        "max_ms": 0.0038,
+        "median_ms": 0.003755,
+        "p95_ms": 0.0038
+      },
+      "incremental_region_recomposition_ms": {
+        "iterations": 20,
+        "max_ms": 0.746442,
+        "median_ms": 0.743752,
+        "p95_ms": 0.746233
+      },
+      "move_one_command_incremental_ms": {
+        "iterations": 20,
+        "max_ms": 7.458511000000001,
+        "median_ms": 6.5896425,
+        "p95_ms": 7.11721115
+      },
+      "move_selected_command_ms": {
+        "iterations": 20,
+        "max_ms": 54.104354,
+        "median_ms": 52.543434500000004,
+        "p95_ms": 54.038842
+      },
+      "overlap": true,
+      "paths": 10,
+      "points_per_path": 100,
+      "pressure_command_incremental_ms": {
+        "iterations": 20,
+        "max_ms": 7.286029999999999,
+        "median_ms": 6.5882225,
+        "p95_ms": 7.20924055
+      },
+      "single_path_raster_ms": {
+        "iterations": 20,
+        "max_ms": 2.743967,
+        "median_ms": 2.5500714999999996,
+        "p95_ms": 2.6905485
+      },
+      "total_points": 1000
+    }
+  ],
+  "schema": "sailine-bench-v1",
+  "warmups": 3,
+  "worktree_dirty": "true"
+}

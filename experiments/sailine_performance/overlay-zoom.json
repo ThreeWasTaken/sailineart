@@ -1,0 +1,96 @@
+{
+  "optimization": "test-profile; override CARGO_PROFILE_TEST_PACKAGE_PHOTOCRAFT_UI_EGUI_OPT_LEVEL=3 for optimized UI",
+  "rows": [
+    {
+      "hovered_pressure_overlay_ms": {
+        "iterations": 20,
+        "max_ms": 0.01292,
+        "median_ms": 0.011635,
+        "p95_ms": 0.012331
+      },
+      "points": 10,
+      "zoom": 0.25
+    },
+    {
+      "hovered_pressure_overlay_ms": {
+        "iterations": 20,
+        "max_ms": 0.012469999999999998,
+        "median_ms": 0.00867,
+        "p95_ms": 0.009525000000000002
+      },
+      "points": 10,
+      "zoom": 1.0
+    },
+    {
+      "hovered_pressure_overlay_ms": {
+        "iterations": 20,
+        "max_ms": 0.00938,
+        "median_ms": 0.008725,
+        "p95_ms": 0.009113999999999999
+      },
+      "points": 10,
+      "zoom": 4.0
+    },
+    {
+      "hovered_pressure_overlay_ms": {
+        "iterations": 20,
+        "max_ms": 0.06837,
+        "median_ms": 0.06437999999999999,
+        "p95_ms": 0.0671825
+      },
+      "points": 100,
+      "zoom": 0.25
+    },
+    {
+      "hovered_pressure_overlay_ms": {
+        "iterations": 20,
+        "max_ms": 0.06895,
+        "median_ms": 0.06506,
+        "p95_ms": 0.065967
+      },
+      "points": 100,
+      "zoom": 1.0
+    },
+    {
+      "hovered_pressure_overlay_ms": {
+        "iterations": 20,
+        "max_ms": 0.06953,
+        "median_ms": 0.065745,
+        "p95_ms": 0.06830449999999999
+      },
+      "points": 100,
+      "zoom": 4.0
+    },
+    {
+      "hovered_pressure_overlay_ms": {
+        "iterations": 20,
+        "max_ms": 0.61307,
+        "median_ms": 0.605015,
+        "p95_ms": 0.6110360499999999
+      },
+      "points": 1000,
+      "zoom": 0.25
+    },
+    {
+      "hovered_pressure_overlay_ms": {
+        "iterations": 20,
+        "max_ms": 0.612431,
+        "median_ms": 0.60703,
+        "p95_ms": 0.6113375499999999
+      },
+      "points": 1000,
+      "zoom": 1.0
+    },
+    {
+      "hovered_pressure_overlay_ms": {
+        "iterations": 20,
+        "max_ms": 0.61616,
+        "median_ms": 0.6104654999999999,
+        "p95_ms": 0.61497345
+      },
+      "points": 1000,
+      "zoom": 4.0
+    }
+  ],
+  "schema": "sailine-overlay-bench-v1"
+}

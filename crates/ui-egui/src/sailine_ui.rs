@@ -1030,12 +1030,64 @@ pub fn draw(app: &PhotocraftApp, painter: &egui::Painter, xf: &ViewXform) {
 mod tests {
     use super::*;
     use crate::canvas::{ToolEvent, tool_event};
+    use std::time::Instant;
 
     fn app() -> PhotocraftApp {
         let mut app = PhotocraftApp::new(photocraft_engine::Session::new(), Default::default());
         app.run("file.new", json!({"width": 200, "height": 200})).unwrap();
         app.ui.tool = Tool::SaiCurve;
         app
+    }
+
+    /// Explicit egui overlay timing; opt-in so normal test runs stay fast and deterministic.
+    #[test]
+    #[ignore = "headless SaiLineArt overlay benchmark; run with --ignored --nocapture"]
+    fn sailine_overlay_bench() {
+        let mut rows = Vec::new();
+        for count in [10usize, 100, 1000] {
+            for zoom in [0.25f32, 1.0, 4.0] {
+                let mut app = app();
+                let points: Vec<[f64; 2]> = (0..count)
+                    .map(|i| [20.0 + i as f64 * 0.25, 100.0 + ((i % 7) as f64 - 3.0) * 0.5])
+                    .collect();
+                app.run("linework.create", json!({"points":points,"width":6.0})).unwrap();
+                app.ui.tool = Tool::SaiPressure;
+                app.hover_doc = Some(points[count / 2]);
+                let ctx = egui::Context::default();
+                let xf = crate::canvas::ViewXform {
+                    rect: egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1000.0, 400.0)),
+                    zoom,
+                    center: [100.0, 100.0],
+                    flip: false,
+                    rotation: 0.0,
+                    aspect: 1.0,
+                };
+                let mut samples = Vec::new();
+                for iteration in 0..22 {
+                    let start = Instant::now();
+                    let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+                        let painter = egui::Painter::new(ui.ctx().clone(), egui::LayerId::background(), egui::Rect::EVERYTHING);
+                        super::draw(&app, &painter, &xf);
+                    });
+                    output.textures_delta.clear();
+                    if iteration >= 2 { samples.push(start.elapsed().as_secs_f64() * 1000.0); }
+                }
+                samples.sort_by(f64::total_cmp);
+                let percentile = |p: f64| {
+                    let rank = (samples.len().saturating_sub(1) as f64) * p;
+                    let lo = rank.floor() as usize;
+                    let hi = (lo + 1).min(samples.len() - 1);
+                    samples[lo] + (samples[hi] - samples[lo]) * (rank - lo as f64)
+                };
+                rows.push(json!({"points":count,"zoom":zoom,"hovered_pressure_overlay_ms":{"iterations":samples.len(),"median_ms":percentile(0.5),"p95_ms":percentile(0.95),"max_ms":samples[samples.len()-1]}}));
+            }
+        }
+        let report = json!({"schema":"sailine-overlay-bench-v1","optimization":"test-profile; override CARGO_PROFILE_TEST_PACKAGE_PHOTOCRAFT_UI_EGUI_OPT_LEVEL=3 for optimized UI","rows":rows});
+        let encoded = serde_json::to_string_pretty(&report).unwrap();
+        println!("{encoded}");
+        if let Ok(path) = std::env::var("SAILINE_BENCH_OUTPUT") {
+            std::fs::write(path, encoded).unwrap();
+        }
     }
 
     fn click(app: &mut PhotocraftApp, x: f64, y: f64) {

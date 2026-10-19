@@ -450,8 +450,8 @@ fn shift_shown(doc: &Document, l: &mut Layer, dx: i32, dy: i32) {
             if let Some(c) = &mut linework.cache {
                 *c = translate_surface(c, dx, dy);
             }
-            for c in linework.path_caches.values_mut() {
-                *c = translate_surface(c, dx, dy);
+            for cache in linework.path_caches.values_mut() {
+                cache.bounds = cache.bounds.translate(dx, dy);
             }
         }
         LayerContent::Smart(sm) => crate::smart_cmds::shift_smart(sm, dx, dy),

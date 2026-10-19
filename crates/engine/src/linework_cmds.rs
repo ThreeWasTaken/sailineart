@@ -4,7 +4,7 @@
 //! remains a response aid for clients that want an immediate preview.
 
 use photocraft_color::Color;
-use photocraft_doc::{Layer, LayerContent, LineworkLayer, LineworkPath, ShapeLayer};
+use photocraft_doc::{Layer, LayerContent, LineworkLayer, LineworkPath, LineworkPathCache, ShapeLayer};
 use photocraft_raster::Surface;
 use photocraft_vector as vector;
 use serde_json::{Value, json};
@@ -139,35 +139,43 @@ fn render_shape(
     vector::linework::variable_width_shape_with_model_and_pointed(points, factors, f64::from(width), color, handle, model, pointed).map_err(EngineError::Other)
 }
 
-fn composite_cache(rect: photocraft_geom::Rect, base: Option<Surface>, overlay: Surface) -> Surface {
-    let Some(mut result) = base else { return overlay };
-    if result.channels() != 4 || overlay.channels() != 4 {
-        return overlay;
+fn composite_cache(rect: photocraft_geom::Rect, base: Option<Surface>, overlay: &LineworkPathCache) -> Surface {
+    let Some(mut result) = base else { return overlay.to_surface() };
+    if result.channels() != 4 || overlay.format.channels() != 4 {
+        return overlay.to_surface();
     }
-    let rect = rect.intersect(&overlay.tile_bounds());
+    let rect = rect.intersect(&overlay.bounds);
     if rect.is_empty() {
         return result;
     }
-    let src = overlay.read_region(rect);
     let mut dst = result.read_region(rect);
-    let (src, _) = src.as_chunks::<4>();
-    let (dst, _) = dst.as_chunks_mut::<4>();
-    for (source, target) in src.iter().zip(dst.iter_mut()) {
-        let sa = source[3].clamp(0.0, 1.0);
-        let da = target[3].clamp(0.0, 1.0);
-        let out_a = sa + da * (1.0 - sa);
-        if out_a <= 1e-6 {
-            target.fill(0.0);
-            continue;
+    let source_width = overlay.bounds.width() as usize;
+    let rect_width = rect.width() as usize;
+    for y in 0..rect.height() as usize {
+        for x in 0..rect_width {
+            let source_index = (((rect.y0 - overlay.bounds.y0) as usize + y) * source_width + (rect.x0 - overlay.bounds.x0) as usize + x) * 4;
+            let target_index = (y * rect_width + x) * 4;
+            let sa = overlay.pixels[source_index + 3].clamp(0.0, 1.0);
+            let da = dst[target_index + 3].clamp(0.0, 1.0);
+            let out_a = sa + da * (1.0 - sa);
+            if out_a <= 1e-6 {
+                dst[target_index..target_index + 4].fill(0.0);
+                continue;
+            }
+            for channel in 0..3 {
+                dst[target_index + channel] = (overlay.pixels[source_index + channel] * sa + dst[target_index + channel] * da * (1.0 - sa)) / out_a;
+            }
+            dst[target_index + 3] = out_a;
         }
-        for channel in 0..3 {
-            target[channel] = (source[channel] * sa + target[channel] * da * (1.0 - sa)) / out_a;
-        }
-        target[3] = out_a;
     }
-    let flattened: Vec<f32> = dst.iter().flat_map(|pixel| pixel.iter().copied()).collect();
-    result.write_region(rect, &flattened);
+    result.write_region(rect, &dst);
     result
+}
+
+/// Exact cache-compositor entry point used only by the headless SaiLineArt performance harness.
+#[cfg(feature = "sailine-bench")]
+pub fn bench_composite_cache(rect: photocraft_geom::Rect, base: Option<Surface>, overlay: &LineworkPathCache) -> Surface {
+    composite_cache(rect, base, overlay)
 }
 
 fn refresh_linework_cache(
@@ -190,7 +198,7 @@ fn refresh_linework_cache(
     if can_patch {
         for id in changed_paths {
             if let Some(old) = path_caches.get(id) {
-                damage = damage.union(&old.tile_bounds());
+                damage = damage.union(&old.bounds);
             }
         }
     }
@@ -204,9 +212,10 @@ fn refresh_linework_cache(
         let pointed: Vec<bool> = path.points.iter().map(|point| point.pointed).collect();
         let mut shape = render_shape(&points, &factors, path.color, path.width, path.handle, model, &pointed)?;
         crate::vector_cmds::refresh_shape(doc, &mut shape);
-        let rendered = shape.cache.ok_or(EngineError::Other("linework render cache missing".into()))?;
-        if changed.contains(&path.id) {
-            damage = damage.union(&rendered.tile_bounds());
+        let rendered_surface = shape.cache.ok_or(EngineError::Other("linework render cache missing".into()))?;
+        let rendered = LineworkPathCache::from_surface(&rendered_surface);
+        if can_patch && changed.contains(&path.id) {
+            damage = damage.union(&rendered.bounds);
         }
         path_caches.insert(path.id, rendered);
     }
@@ -215,8 +224,8 @@ fn refresh_linework_cache(
     if !region.is_empty() {
         for path in paths {
             let rendered = path_caches.get(&path.id).ok_or(EngineError::Other("linework path render cache missing".into()))?;
-            // Clipping every blend to the affected tiles preserves the rest of the layer cache.
-            cache = Some(composite_cache(region, cache, rendered.clone()));
+            // Clipping every blend to the affected pixel bounds preserves the rest of the layer cache.
+            cache = Some(composite_cache(region, cache, rendered));
         }
     }
     let cache = if let (true, Some(mut previous)) = (can_patch, previous_cache) {
@@ -275,18 +284,22 @@ fn create(s: &mut Session, p: &Value) -> Result<Value> {
         crate::vector_cmds::refresh_shape(doc, &mut shape);
         let name = requested_name.unwrap_or_else(|| doc.next_layer_name("Linework"));
         let rendered = shape.cache.take().ok_or(EngineError::Other("linework render cache missing".into()))?;
+        let path_cache = LineworkPathCache::from_surface(&rendered);
         let bounds = doc.bounds();
         if let Some(active_id) = *active
             && let Some(layer) = doc.layer_mut(active_id)
             && let LayerContent::Linework(linework) = &mut layer.content
         {
-            linework.path_caches.insert(line.id, rendered.clone());
-            linework.cache = Some(composite_cache(bounds, linework.cache.take(), rendered));
+            linework.path_caches.insert(line.id, path_cache.clone());
+            linework.cache = Some(composite_cache(bounds, linework.cache.take(), &path_cache));
             linework.paths.push(line);
             return Ok(active_id);
         }
-        let path_caches = std::iter::once((line.id, rendered.clone())).collect();
-        let id = doc.insert_above(*active, Layer::new(name, LayerContent::Linework(LineworkLayer { paths: vec![line], cache: Some(rendered), path_caches })));
+        let path_caches = std::iter::once((line.id, path_cache)).collect();
+        let id = doc.insert_above(
+            *active,
+            Layer::new(name, LayerContent::Linework(LineworkLayer { paths: vec![line], cache: Some(rendered), path_caches })),
+        );
         *active = Some(id);
         Ok(id)
     })?;

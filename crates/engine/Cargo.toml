@@ -10,6 +10,8 @@ workspace = true
 [features]
 # Real-file corpus tests (opt-in; `cargo xtask test-corpus`). Fail when the corpus is missing.
 corpus = []
+# Exposes the exact Linework cache compositor to its reproducible headless benchmark.
+sailine-bench = ["photocraft-doc/sailine-bench"]
 
 [dependencies]
 photocraft-geom = { workspace = true }

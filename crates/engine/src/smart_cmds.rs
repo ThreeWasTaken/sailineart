@@ -667,8 +667,8 @@ fn shift_layer(l: &mut Layer, dx: i32, dy: i32) {
             if let Some(c) = &mut linework.cache {
                 *c = mv(c);
             }
-            for c in linework.path_caches.values_mut() {
-                *c = mv(c);
+            for cache in linework.path_caches.values_mut() {
+                cache.bounds = cache.bounds.translate(dx, dy);
             }
         }
         LayerContent::Smart(sm) => shift_smart(sm, dx, dy),

@@ -470,3 +470,46 @@ fn incremental_linework_cache_matches_full_rebuild_after_drag_and_pressure() {
     let LayerContent::Linework(linework) = &s.active().unwrap().doc.layer(photocraft_doc::LayerId(layer)).unwrap().content else { panic!() };
     assert_eq!(linework.cache, cache);
 }
+
+#[test]
+fn path_raster_snapshots_survive_undo_redo_and_release_with_history() {
+    let mut session = Session::new();
+    session.execute("file.new", json!({"width": 128, "height": 64})).unwrap();
+    let layer = session.execute("linework.create", json!({"points": [[8, 32], [120, 32]], "width": 8})).unwrap()["layer"].as_u64().unwrap();
+    let (path_id, point_id, original_cache) = {
+        let LayerContent::Linework(linework) = &session.active().unwrap().doc.layer(photocraft_doc::LayerId(layer)).unwrap().content else { panic!() };
+        let path = &linework.paths[0];
+        (path.id, path.points[0].id, linework.path_caches.get(&path.id).unwrap().clone())
+    };
+    let original_pixels = original_cache.pixels.clone();
+    let original_weak = std::sync::Arc::downgrade(&original_cache.pixels);
+
+    session.execute("linework.setPointWidth", json!({"layer": layer, "path": path_id, "point": point_id, "factor": 2.0})).unwrap();
+    let changed_cache = {
+        let LayerContent::Linework(linework) = &session.active().unwrap().doc.layer(photocraft_doc::LayerId(layer)).unwrap().content else { panic!() };
+        linework.path_caches.get(&path_id).unwrap().clone()
+    };
+    let changed_pixels = changed_cache.pixels.clone();
+    let changed_weak = std::sync::Arc::downgrade(&changed_cache.pixels);
+    assert!(!std::sync::Arc::ptr_eq(&original_pixels, &changed_pixels));
+    assert!(session.undo());
+    {
+        let LayerContent::Linework(linework) = &session.active().unwrap().doc.layer(photocraft_doc::LayerId(layer)).unwrap().content else { panic!() };
+        assert!(std::sync::Arc::ptr_eq(&linework.path_caches.get(&path_id).unwrap().pixels, &original_pixels));
+        assert_eq!(linework.path_caches.get(&path_id).unwrap().pixels.as_ref(), original_pixels.as_ref());
+    }
+    assert!(session.redo());
+    {
+        let LayerContent::Linework(linework) = &session.active().unwrap().doc.layer(photocraft_doc::LayerId(layer)).unwrap().content else { panic!() };
+        assert!(std::sync::Arc::ptr_eq(&linework.path_caches.get(&path_id).unwrap().pixels, &changed_pixels));
+        assert_eq!(linework.path_caches.get(&path_id).unwrap().pixels.as_ref(), changed_pixels.as_ref());
+    }
+
+    drop(original_cache);
+    drop(changed_cache);
+    drop(original_pixels);
+    drop(changed_pixels);
+    drop(session);
+    assert!(original_weak.upgrade().is_none());
+    assert!(changed_weak.upgrade().is_none());
+}

@@ -9,6 +9,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use photocraft_color::Color;
 use photocraft_raster::Surface;
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 
 const MAX_PATHS: usize = 4096;
 const MAX_POINTS: usize = 4096;
@@ -90,6 +91,36 @@ impl LineworkPath {
     }
 }
 
+/// Compact, transient raster for one path. Pixels share an `Arc` across history snapshots and
+/// occupy only the outline bounds rather than every full tile touched by a long stroke.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LineworkPathCache {
+    /// Exact document-space bounds of the non-transparent cached pixels.
+    pub bounds: photocraft_geom::Rect,
+    /// Compact row-major RGBA samples; unlike `Surface`, this does not allocate whole 256px tiles.
+    pub pixels: Arc<[f32]>,
+    pub format: photocraft_color::PixelFormat,
+}
+
+impl LineworkPathCache {
+    pub fn from_surface(surface: &Surface) -> Self {
+        #[cfg(feature = "sailine-bench")]
+        let bounds = if std::env::var("SAILINE_CACHE_BOUNDS").as_deref() == Ok("tile") { surface.tile_bounds() } else { surface.content_bounds() };
+        #[cfg(not(feature = "sailine-bench"))]
+        let bounds = surface.content_bounds();
+        let pixels = if bounds.is_empty() { Vec::new() } else { surface.read_region(bounds) };
+        Self { bounds, pixels: Arc::from(pixels), format: surface.format() }
+    }
+
+    pub fn to_surface(&self) -> Surface {
+        let mut surface = Surface::new(self.format);
+        if !self.bounds.is_empty() {
+            surface.write_region(self.bounds, &self.pixels);
+        }
+        surface
+    }
+}
+
 /// A persistent SaiLine layer containing multiple independent strokes.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct LineworkLayer {
@@ -99,7 +130,7 @@ pub struct LineworkLayer {
     pub cache: Option<Surface>,
     /// Transient raster per path. Kept out of the file and logical equality.
     #[serde(skip)]
-    pub path_caches: std::collections::BTreeMap<u64, Surface>,
+    pub path_caches: std::collections::BTreeMap<u64, LineworkPathCache>,
 }
 
 impl PartialEq for LineworkLayer {
@@ -233,5 +264,27 @@ mod tests {
         let point: LineworkPoint = serde_json::from_value(serde_json::json!({"id": 41, "position": [12.0, 18.0]})).unwrap();
         assert_eq!(point.width_factor, 1.0);
         assert_eq!(point.position, [12.0, 18.0]);
+    }
+
+    #[test]
+    fn path_cache_snapshots_are_copy_on_write_and_release_pixels() {
+        let cache = LineworkPathCache {
+            bounds: photocraft_geom::Rect::new(0, 0, 1, 1),
+            pixels: Arc::from([0.25, 0.5, 0.75, 1.0]),
+            format: photocraft_color::PixelFormat::RGBA32F,
+        };
+        let weak = Arc::downgrade(&cache.pixels);
+        let history_snapshot = cache.clone();
+        assert!(Arc::ptr_eq(&cache.pixels, &history_snapshot.pixels));
+
+        let mut edited_cache = cache.clone();
+        Arc::make_mut(&mut edited_cache.pixels)[0] = 0.9;
+        assert_eq!(history_snapshot.pixels[0], 0.25);
+        assert_eq!(edited_cache.pixels[0], 0.9);
+        assert!(!Arc::ptr_eq(&edited_cache.pixels, &history_snapshot.pixels));
+
+        drop(cache);
+        drop(history_snapshot);
+        assert!(weak.upgrade().is_none(), "the last snapshot drop should release the shared pixel buffer");
     }
 }

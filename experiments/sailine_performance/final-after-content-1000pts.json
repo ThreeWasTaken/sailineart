@@ -1,0 +1,81 @@
+{
+  "arch": "x86_64",
+  "cache_bounds": "content",
+  "case_index": 4,
+  "cpu_model": "AMD Ryzen 7 5800X 8-Core Processor",
+  "git_commit": "ac2b2ba121abdce0171af9fb0de179e95207ff35",
+  "optimization": "release",
+  "os": "linux",
+  "peak_rss_kib": 215568,
+  "profile": "full",
+  "repetitions": 10,
+  "rows": [
+    {
+      "canvas": [
+        2048,
+        2048
+      ],
+      "contour_build_ms": {
+        "iterations": 10,
+        "max_ms": 1.868757,
+        "median_ms": 1.7872350000000001,
+        "p95_ms": 1.83651405
+      },
+      "edit_snapshot_clone_only_ms": {
+        "iterations": 10,
+        "max_ms": 0.01405,
+        "median_ms": 0.00957,
+        "p95_ms": 0.013104999999999999
+      },
+      "full_layer_rebuild_command_ms": {
+        "iterations": 10,
+        "max_ms": 513.6097699999999,
+        "median_ms": 491.65623,
+        "p95_ms": 513.0985870999999
+      },
+      "geometry_ms": {
+        "iterations": 10,
+        "max_ms": 0.057521,
+        "median_ms": 0.0365005,
+        "p95_ms": 0.05201704999999999
+      },
+      "incremental_region_recomposition_ms": {
+        "iterations": 10,
+        "max_ms": 1.7828950000000001,
+        "median_ms": 1.7591855,
+        "p95_ms": 1.781356
+      },
+      "move_one_command_incremental_ms": {
+        "iterations": 10,
+        "max_ms": 43.420024,
+        "median_ms": 42.6659225,
+        "p95_ms": 43.227349749999995
+      },
+      "move_selected_command_ms": {
+        "iterations": 10,
+        "max_ms": 495.780571,
+        "median_ms": 490.22790050000003,
+        "p95_ms": 493.89144715000003
+      },
+      "overlap": true,
+      "paths": 10,
+      "points_per_path": 1000,
+      "pressure_command_incremental_ms": {
+        "iterations": 10,
+        "max_ms": 43.296332,
+        "median_ms": 42.6902275,
+        "p95_ms": 43.1336516
+      },
+      "single_path_raster_ms": {
+        "iterations": 10,
+        "max_ms": 28.816478999999998,
+        "median_ms": 28.1851675,
+        "p95_ms": 28.679736149999997
+      },
+      "total_points": 10000
+    }
+  ],
+  "schema": "sailine-bench-v1",
+  "warmups": 2,
+  "worktree_dirty": "true"
+}
