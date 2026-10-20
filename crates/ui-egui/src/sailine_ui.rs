@@ -77,6 +77,7 @@ pub struct PointPressureDrag {
     pub start_factor: f32,
     pub current_factor: f32,
     pub moved: bool,
+    pub shift_click_selection: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
@@ -135,7 +136,9 @@ pub fn sync(app: &mut PhotocraftApp) {
     if !is_sailine_tool(app.ui.tool)
         || app.session.active().is_none_or(|state| {
             app.ui.sailine_selection.as_ref().is_some_and(|selection| state.doc.id != selection.document)
-                || app.ui.sailine_combine_first.as_ref().is_some_and(|selection| state.doc.id != selection.document)
+                || app.ui.sailine_selection.as_ref().is_some_and(|selection| Some(selection.layer) != state.active_layer)
+                || app.ui.sailine_selections.iter().any(|selection| state.doc.id != selection.document || Some(selection.layer) != state.active_layer)
+                || app.ui.sailine_combine_first.as_ref().is_some_and(|selection| state.doc.id != selection.document || Some(selection.layer) != state.active_layer)
         })
     {
         app.ui.sailine_shared_gesture = None;
@@ -144,7 +147,14 @@ pub fn sync(app: &mut PhotocraftApp) {
         .ui
         .sailine_selection
         .as_ref()
-        .is_some_and(|selection| !is_sailine_tool(app.ui.tool) || app.session.active().is_none_or(|s| s.doc.id != selection.document))
+        .is_some_and(|selection| {
+            !is_sailine_tool(app.ui.tool)
+                || app.session.active().is_none_or(|s| s.doc.id != selection.document || Some(selection.layer) != s.active_layer)
+        })
+        || app.ui.sailine_selections.iter().any(|selection| {
+            !is_sailine_tool(app.ui.tool)
+                || app.session.active().is_none_or(|s| s.doc.id != selection.document || Some(selection.layer) != s.active_layer)
+        })
     {
         app.ui.sailine_selection = None;
         app.ui.sailine_selections.clear();
@@ -155,7 +165,9 @@ pub fn sync(app: &mut PhotocraftApp) {
         app.ui.sailine_combine_first = None;
     }
     if app.ui.sailine_pressure_drag.as_ref().is_some_and(|drag| {
-        app.ui.tool != Tool::SaiPressure || app.session.active().is_none_or(|state| state.doc.id != drag.selection.document)
+        (app.ui.tool != Tool::SaiPressure && !(app.ui.tool == Tool::SaiCurve && drag.shift_click_selection))
+            || app.session.active().is_none_or(|state| state.doc.id != drag.selection.document)
+            || app.session.active().is_none_or(|state| Some(drag.selection.layer) != state.active_layer)
     }) {
         app.ui.sailine_pressure_drag = None;
         app.sailine_point_preview = None;
@@ -228,6 +240,9 @@ pub fn down_with_mods(app: &mut PhotocraftApp, point: [f64; 2], mods: Modifiers)
 pub fn tool_down(app: &mut PhotocraftApp, point: [f64; 2], mods: Modifiers) {
     if mods.shift {
         if let Some((layer, path, point_id)) = nearest_point(app, point) {
+            if app.ui.tool == Tool::SaiCurve && begin_curve_shift_pressure_drag(app, point, layer, path, point_id) {
+                return;
+            }
             if let Some(document) = app.session.active().map(|s| s.doc.id) {
                 let selection = Selection { document, layer, path, point: point_id };
                 if let Some(index) = app.ui.sailine_selections.iter().position(|candidate| *candidate == selection) {
@@ -709,13 +724,47 @@ pub fn begin_pressure_drag(app: &mut PhotocraftApp, point: [f64; 2]) -> bool {
     let Some(document) = app.session.active().map(|s| s.doc.id) else { return false };
     let Some((layer, path, point_id)) = nearest_point(app, point) else { return false };
     let selection = Selection { document, layer, path, point: point_id };
+    let selections = if app.ui.sailine_selections.contains(&selection) {
+        app.ui.sailine_selections.clone()
+    } else {
+        vec![selection]
+    };
+    app.ui.sailine_selections = selections.clone();
+    app.ui.sailine_selection = Some(selection);
+    start_pressure_drag(app, point, selection, selections, false)
+}
+
+fn begin_curve_shift_pressure_drag(app: &mut PhotocraftApp, point: [f64; 2], layer: LayerId, path: u64, point_id: u64) -> bool {
+    if app.ui.sailine.is_some() {
+        return false;
+    }
+    let Some(document) = app.session.active().map(|state| state.doc.id) else { return false };
+    let selection = Selection { document, layer, path, point: point_id };
+    let already_selected = app.ui.sailine_selections.contains(&selection) || app.ui.sailine_selection == Some(selection);
+    let selections = if already_selected {
+        let mut selections = app.ui.sailine_selections.clone();
+        if selections.is_empty() {
+            selections.push(selection);
+        } else if !selections.contains(&selection) {
+            selections.push(selection);
+        }
+        selections
+    } else {
+        vec![selection]
+    };
+    start_pressure_drag(app, point, selection, selections, true)
+}
+
+fn start_pressure_drag(
+    app: &mut PhotocraftApp,
+    point: [f64; 2],
+    selection: Selection,
+    selections: Vec<Selection>,
+    shift_click_selection: bool,
+) -> bool {
     let Some(factor) = point_width(app, selection) else { return false };
     let factor = factor.clamp(0.0, 2.0);
-    if !app.ui.sailine_selections.contains(&selection) {
-        app.ui.sailine_selections = vec![selection];
-    }
-    app.ui.sailine_selection = Some(selection);
-    let selections: Vec<_> = app.ui.sailine_selections.iter().copied().filter(|s| point_width(app, *s).is_some()).collect();
+    let selections: Vec<_> = selections.into_iter().filter(|candidate| point_width(app, *candidate).is_some()).collect();
     let origins = selections.iter().filter_map(|s| point_width(app, *s)).collect();
     let Some(source) = app.session.active().map(|state| state.doc.clone()) else { return false };
     let mut paths = Vec::new();
@@ -738,7 +787,7 @@ pub fn begin_pressure_drag(app: &mut PhotocraftApp, point: [f64; 2]) -> bool {
         return false;
     }
     let key = NEXT_DRAG.fetch_add(1, Ordering::Relaxed);
-    app.sailine_point_preview = Some(PointDragPreview { document, key, doc: std::sync::Arc::new(preview_doc), paths });
+    app.sailine_point_preview = Some(PointDragPreview { document: selection.document, key, doc: std::sync::Arc::new(preview_doc), paths });
     app.ui.sailine_pressure_drag = Some(PointPressureDrag {
         selection,
         selections,
@@ -747,6 +796,7 @@ pub fn begin_pressure_drag(app: &mut PhotocraftApp, point: [f64; 2]) -> bool {
         start_factor: factor,
         current_factor: factor,
         moved: false,
+        shift_click_selection,
     });
     true
 }
@@ -784,6 +834,14 @@ pub fn end_pressure_drag(app: &mut PhotocraftApp, point: [f64; 2]) {
         commit_pressure_drag(app, &drag);
     } else {
         app.sailine_point_preview = None;
+        if drag.shift_click_selection {
+            if let Some(index) = app.ui.sailine_selections.iter().position(|candidate| *candidate == drag.selection) {
+                app.ui.sailine_selections.remove(index);
+            } else {
+                app.ui.sailine_selections.push(drag.selection);
+            }
+            app.ui.sailine_selection = app.ui.sailine_selections.first().copied();
+        }
     }
 }
 
@@ -1216,6 +1274,40 @@ mod tests {
         app.run("file.new", json!({"width": 200, "height": 200})).unwrap();
         app.ui.tool = Tool::SaiCurve;
         app
+    }
+
+    #[test]
+    fn changing_active_layer_clears_sailine_point_selection_and_preview_state() {
+        let mut app = app();
+        let created = app.run("linework.create", json!({"points":[[20,40],[100,40]],"width":4})).unwrap();
+        let linework_layer = LayerId(created["layer"].as_u64().unwrap());
+        let point = match &app.session.active().unwrap().doc.layer(linework_layer).unwrap().content {
+            photocraft_doc::LayerContent::Linework(linework) => linework.paths[0].points[0].id,
+            _ => panic!("linework expected"),
+        };
+        let selection = Selection {
+            document: app.session.active().unwrap().doc.id,
+            layer: linework_layer,
+            path: match &app.session.active().unwrap().doc.layer(linework_layer).unwrap().content {
+                photocraft_doc::LayerContent::Linework(linework) => linework.paths[0].id,
+                _ => panic!("linework expected"),
+            },
+            point,
+        };
+        app.ui.sailine_selection = Some(selection);
+        app.ui.sailine_selections = vec![selection];
+
+        let new_layer = app.run("layer.new.layer", json!({})).unwrap();
+        let raster_layer = LayerId(new_layer["layer"].as_u64().unwrap());
+        assert_eq!(app.session.active().unwrap().active_layer, Some(raster_layer));
+
+        sync(&mut app);
+
+        assert!(app.ui.sailine_selection.is_none());
+        assert!(app.ui.sailine_selections.is_empty());
+        assert!(app.ui.sailine_point_drag.is_none());
+        assert!(app.sailine_point_preview.is_none());
+        assert!(nearest_point(&app, [20.0, 40.0]).is_none());
     }
 
     /// Explicit egui overlay timing; opt-in so normal test runs stay fast and deterministic.
@@ -1779,6 +1871,89 @@ mod tests {
                 .map(|p| p.width_factor),
             Some(0.0)
         );
+    }
+
+    #[test]
+    fn sai_curve_shift_click_selects_without_pressure_change() {
+        let mut app = app();
+        app.run("linework.create", json!({"points": [[20.0, 30.0], [100.0, 100.0], [160.0, 130.0]], "width": 4.0})).unwrap();
+        let layer = app.session.active().unwrap().active_layer.unwrap();
+        let (path, point) = match &app.session.active().unwrap().doc.layer(layer).unwrap().content {
+            photocraft_doc::LayerContent::Linework(linework) => (linework.paths[0].id, linework.paths[0].points[1].id),
+            _ => panic!("linework expected"),
+        };
+        app.ui.tool = Tool::SaiCurve;
+        let history = app.session.active().unwrap().history.entries().len();
+        let journal = app.session.journal.len();
+
+        tool_event(&mut app, ToolEvent::Down { x: 100.0, y: 100.0, pressure: 1.0 }, Modifiers::SHIFT);
+        assert!(app.ui.sailine_pressure_drag.is_some(), "the mouse-down hit test locks the point for this gesture");
+        tool_event(&mut app, ToolEvent::Up { x: 100.0, y: 100.0 }, Modifiers::SHIFT);
+
+        assert!(app.ui.sailine_pressure_drag.is_none());
+        assert_eq!(app.session.journal.len(), journal);
+        assert_eq!(app.session.active().unwrap().history.entries().len(), history);
+        assert_eq!(app.ui.sailine_selections, vec![Selection { document: app.session.active().unwrap().doc.id, layer, path, point }]);
+        assert_eq!(point_width(&app, app.ui.sailine_selections[0]), Some(1.0));
+
+        tool_event(&mut app, ToolEvent::Down { x: 100.0, y: 100.0, pressure: 1.0 }, Modifiers::SHIFT);
+        tool_event(&mut app, ToolEvent::Up { x: 100.0, y: 100.0 }, Modifiers::SHIFT);
+        assert!(app.ui.sailine_selections.is_empty(), "a second Shift+click keeps the existing toggle-selection behavior");
+    }
+
+    #[test]
+    fn sai_curve_shift_drag_reuses_pressure_preview_for_selected_and_unselected_points() {
+        let mut app = app();
+        app.run("linework.create", json!({"points": [[20.0, 30.0], [100.0, 100.0], [160.0, 130.0]], "width": 4.0})).unwrap();
+        let layer = app.session.active().unwrap().active_layer.unwrap();
+        let (path, point_ids) = match &app.session.active().unwrap().doc.layer(layer).unwrap().content {
+            photocraft_doc::LayerContent::Linework(linework) => (linework.paths[0].id, linework.paths[0].points.iter().map(|point| point.id).collect::<Vec<_>>()),
+            _ => panic!("linework expected"),
+        };
+        let document = app.session.active().unwrap().doc.id;
+        app.ui.tool = Tool::SaiCurve;
+        let first = Selection { document, layer, path, point: point_ids[0] };
+        let second = Selection { document, layer, path, point: point_ids[1] };
+        let third = Selection { document, layer, path, point: point_ids[2] };
+        app.ui.sailine_selections = vec![first, second];
+        app.ui.sailine_selection = Some(first);
+        let journal = app.session.journal.len();
+
+        tool_event(&mut app, ToolEvent::Down { x: 100.0, y: 100.0, pressure: 1.0 }, Modifiers::SHIFT);
+        assert_eq!(app.ui.sailine_pressure_drag.as_ref().map(|drag| drag.selections.clone()), Some(vec![first, second]));
+        assert!(app.sailine_point_preview.is_some());
+        tool_event(&mut app, ToolEvent::Move { x: 160.0, y: 100.0, pressure: 1.0 }, Modifiers::NONE);
+        assert_eq!(app.session.journal.len(), journal, "drag preview never dispatches per-move commands");
+        assert_eq!(point_width(&app, first), Some(1.0), "the persistent document stays unchanged before release");
+        tool_event(&mut app, ToolEvent::Up { x: 160.0, y: 100.0 }, Modifiers::NONE);
+        assert_eq!(point_width(&app, first), Some(1.5));
+        assert_eq!(point_width(&app, second), Some(1.5));
+        assert_eq!(app.session.journal.len(), journal + 1);
+        assert!(app.session.undo());
+        assert_eq!(point_width(&app, first), Some(1.0));
+        assert_eq!(point_width(&app, second), Some(1.0));
+
+        // The selected set remains intact, but dragging an unselected point edits only that hit.
+        tool_event(&mut app, ToolEvent::Down { x: 160.0, y: 130.0, pressure: 1.0 }, Modifiers::SHIFT);
+        assert_eq!(app.ui.sailine_pressure_drag.as_ref().map(|drag| drag.selections.clone()), Some(vec![third]));
+        tool_event(&mut app, ToolEvent::Move { x: 220.0, y: 130.0, pressure: 1.0 }, Modifiers::SHIFT);
+        tool_event(&mut app, ToolEvent::Up { x: 220.0, y: 130.0 }, Modifiers::SHIFT);
+        assert_eq!(point_width(&app, first), Some(1.0));
+        assert_eq!(point_width(&app, second), Some(1.0));
+        assert_eq!(point_width(&app, third), Some(1.5));
+    }
+
+    #[test]
+    fn sai_curve_shift_drag_off_points_keeps_rectangular_selection() {
+        let mut app = app();
+        app.run("linework.create", json!({"points": [[20.0, 30.0], [100.0, 140.0], [170.0, 40.0]], "width": 3.0})).unwrap();
+        app.ui.tool = Tool::SaiCurve;
+        tool_event(&mut app, ToolEvent::Down { x: 0.0, y: 0.0, pressure: 1.0 }, Modifiers::SHIFT);
+        assert!(app.ui.sailine_selection_box.is_some());
+        tool_event(&mut app, ToolEvent::Move { x: 120.0, y: 150.0, pressure: 1.0 }, Modifiers::SHIFT);
+        tool_event(&mut app, ToolEvent::Up { x: 120.0, y: 150.0 }, Modifiers::SHIFT);
+        assert_eq!(app.ui.sailine_selections.len(), 2);
+        assert!(app.ui.sailine_pressure_drag.is_none());
     }
 
     #[test]

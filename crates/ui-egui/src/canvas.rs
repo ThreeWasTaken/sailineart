@@ -5412,7 +5412,7 @@ pub fn tool_event(app: &mut PhotocraftApp, ev: ToolEvent, mods: egui::Modifiers)
             if matches!(tool, Tool::SaiCurve | Tool::SaiPressure) && crate::sailine_ui::drag_to(app, [x, y]) {
                 return;
             }
-            if tool == Tool::SaiPressure && crate::sailine_ui::pressure_drag_to(app, [x, y]) {
+            if app.ui.sailine_pressure_drag.is_some() && crate::sailine_ui::pressure_drag_to(app, [x, y]) {
                 return;
             }
             if crate::sailine_ui::is_sailine_tool(tool) && crate::sailine_ui::selection_box_to(app, [x, y]) {
@@ -5430,7 +5430,7 @@ pub fn tool_event(app: &mut PhotocraftApp, ev: ToolEvent, mods: egui::Modifiers)
             feed_live_stroke(app);
         }
         ToolEvent::Up { x, y } => {
-            if tool == Tool::SaiPressure && app.ui.sailine_pressure_drag.is_some() {
+            if app.ui.sailine_pressure_drag.is_some() {
                 crate::sailine_ui::end_pressure_drag(app, [x, y]);
                 return;
             }
