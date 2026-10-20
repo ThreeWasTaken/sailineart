@@ -33,6 +33,8 @@ pub(crate) struct Row {
     /// SaiLineArt event-to-handler delay, synchronous move command and pointer age after it.
     pub sailine_input: f64,
     pub sailine_command: f64,
+    pub sailine_preview: f64,
+    pub sailine_preview_events: u64,
     pub sailine_pointer_age: f64,
     /// Engine refresh stages (centerline interpolation + contour construction are one vector call).
     pub sailine_snapshot_clone: f64,
@@ -82,6 +84,7 @@ pub struct Summary {
     pub native_updates: [f64; 2],
     pub sailine_input: [f64; 2],
     pub sailine_command: [f64; 2],
+    pub sailine_preview: [f64; 2],
     pub sailine_pointer_age: [f64; 2],
     pub sailine_snapshot_clone: [f64; 2],
     pub sailine_shape: [f64; 2],
@@ -125,6 +128,7 @@ impl Summary {
             f("brush-updates/frame", self.native_updates),
             f("sai-input", self.sailine_input),
             f("sai-command", self.sailine_command),
+            f("sai-preview-calc", self.sailine_preview),
             f("sai-pointer-age", self.sailine_pointer_age),
             f("sai-snapshot-copy", self.sailine_snapshot_clone),
             f("sai-shape", self.sailine_shape),
@@ -306,6 +310,18 @@ impl StrokeTrace {
         }
     }
 
+    /// One Ctrl+T preview calculation; its frame submission is measured independently by
+    /// `canvas_ready_ms`, `handoff_pointer_age` and the backend CPU estimate.
+    pub fn sailine_preview(&mut self, input_ms: Option<f64>, preview_ms: f64, pointer_age_ms: Option<f64>) {
+        let Some(frame) = self.frame.as_mut() else { return };
+        frame.sailine_events += 1;
+        frame.sailine_preview_events += 1;
+        frame.sailine_input += input_ms.unwrap_or_default();
+        frame.sailine_preview += preview_ms;
+        frame.sailine_pointer_age = pointer_age_ms.unwrap_or_default();
+        self.last_interactive_update = Some(Instant::now());
+    }
+
     /// Called by the main canvas after its GPU/CPU texture is current for this frame. This is
     /// the app-visible image preparation point, before eframe tessellation and backend submission.
     pub fn canvas_ready(&mut self) {
@@ -371,6 +387,7 @@ impl StrokeTrace {
             native_updates: col(|r| Some(r.native_updates as f64)),
             sailine_input: col(|r| (r.sailine_events > 0).then_some(r.sailine_input)),
             sailine_command: col(|r| (r.sailine_updates > 0).then_some(r.sailine_command)),
+            sailine_preview: col(|r| (r.sailine_preview_events > 0).then_some(r.sailine_preview)),
             sailine_pointer_age: col(|r| (r.sailine_events > 0).then_some(r.sailine_pointer_age)),
             sailine_snapshot_clone: col(|r| (r.sailine_updates > 0).then_some(r.sailine_snapshot_clone)),
             sailine_shape: col(|r| (r.sailine_updates > 0).then_some(r.sailine_shape)),
@@ -416,15 +433,15 @@ impl StrokeTrace {
 pub(crate) fn csv(stroke: usize, rows: &[Row], header: bool) -> String {
     let mut s = String::new();
     if header {
-        s.push_str("stroke,t_ms,interval_ms,moves,raw_hook_ms,logic_ms,brush_input_age_ms,brush_updates,stroke_ms,sai_events,sai_updates,sai_input_ms,sai_command_ms,sai_pointer_age_ms,sai_snapshot_clone_ms,sai_shape_ms,sai_raster_ms,sai_path_cache_ms,sai_damage_bounds_ms,sai_composition_ms,sai_writeback_ms,sai_refresh_ms,canvas_ready_ms,canvas_ready_pointer_age_ms,ui_handoff_pointer_age_ms,submit_age_estimate_ms,cpu_after_ui_estimate_ms,canvas_ms,canvas_composite_ms,texture_upload_ms,refreshes,refreshed_pixels,gpu_uploads,ui_ms,cpu_frame_ms\n");
+        s.push_str("stroke,t_ms,interval_ms,moves,raw_hook_ms,logic_ms,brush_input_age_ms,brush_updates,stroke_ms,sai_events,sai_updates,sai_input_ms,sai_command_ms,sai_preview_ms,sai_preview_events,sai_pointer_age_ms,sai_snapshot_clone_ms,sai_shape_ms,sai_raster_ms,sai_path_cache_ms,sai_damage_bounds_ms,sai_composition_ms,sai_writeback_ms,sai_refresh_ms,canvas_ready_ms,canvas_ready_pointer_age_ms,ui_handoff_pointer_age_ms,submit_age_estimate_ms,cpu_after_ui_estimate_ms,canvas_ms,canvas_composite_ms,texture_upload_ms,refreshes,refreshed_pixels,gpu_uploads,ui_ms,cpu_frame_ms\n");
     }
     for r in rows {
         let cpu = r.cpu_prev.map_or(String::new(), |c| format!("{c:.3}"));
         let after_ui = r.cpu_after_ui.map_or(String::new(), |v| format!("{v:.3}"));
         let submit_age = r.estimated_submit_age.map_or(String::new(), |v| format!("{v:.3}"));
-        let _ = writeln!(s, "{stroke},{:.3},{:.3},{},{:.3},{:.3},{:.3},{},{:.3},{},{},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{submit_age},{after_ui},{:.3},{:.3},{:.3},{},{},{},{:.3},{cpu}",
+        let _ = writeln!(s, "{stroke},{:.3},{:.3},{},{:.3},{:.3},{:.3},{},{:.3},{},{},{:.3},{:.3},{:.3},{},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{submit_age},{after_ui},{:.3},{:.3},{:.3},{},{},{},{:.3},{:.3},{cpu}",
             r.t, r.interval, r.moves, r.raw_hook, r.logic, r.native_input_age, r.native_updates, r.stroke,
-            r.sailine_events, r.sailine_updates, r.sailine_input, r.sailine_command,
+            r.sailine_events, r.sailine_updates, r.sailine_input, r.sailine_command, r.sailine_preview, r.sailine_preview_events,
             r.sailine_pointer_age, r.sailine_snapshot_clone, r.sailine_shape, r.sailine_raster, r.sailine_path_cache, r.sailine_damage_bounds,
             r.sailine_composition, r.sailine_writeback, r.sailine_refresh, r.canvas_ready_ms, r.canvas_ready_pointer_age,
             r.handoff_pointer_age, r.canvas, r.canvas_composite, r.canvas_upload, r.refreshes, r.refreshed_pixels, r.gpu_uploads, r.ui);

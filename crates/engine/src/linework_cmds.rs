@@ -429,6 +429,30 @@ fn refresh_linework_cache(
     Ok(region)
 }
 
+/// A transient document used by the SaiLineArt transform preview. The canonical source document
+/// is never touched; complete affected paths are omitted so their old raster cannot ghost under
+/// the vector preview. Remaining paths use the normal compositor and interpolation cache.
+pub fn preview_without_paths(
+    source: &photocraft_doc::Document,
+    layer_id: photocraft_doc::LayerId,
+    excluded: &[u64],
+) -> Result<photocraft_doc::Document> {
+    let mut preview = source.clone();
+    let excluded: std::collections::BTreeSet<_> = excluded.iter().copied().collect();
+    let remaining = {
+        let layer = preview.layer_mut(layer_id).ok_or(EngineError::NoLayer(layer_id))?;
+        let LayerContent::Linework(linework) = &mut layer.content else {
+            return Err(EngineError::Other("layer is not Linework".into()));
+        };
+        linework.paths.retain(|path| !excluded.contains(&path.id));
+        linework.path_caches.retain(|id, _| !excluded.contains(id));
+        linework.cache = None;
+        linework.paths.iter().map(|path| path.id).collect::<Vec<_>>()
+    };
+    refresh_linework_cache(&mut preview, layer_id, &remaining, vector::linework::InterpolationModel::SaiSimplified)?;
+    Ok(preview)
+}
+
 /// Rebuild the transient Linework render cache before operations that need its pixel output.
 /// The canonical point data stays untouched; a missing cache (for example after loading a
 /// document) is rendered with SaiLineArt's production interpolation model.

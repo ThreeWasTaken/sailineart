@@ -1157,6 +1157,9 @@ pub(crate) fn display_doc(app: &mut PhotocraftApp, idx: usize) -> (std::sync::Ar
     }
     crate::transform_tool::follow_edits(app);
     let st = &app.session.documents()[idx];
+    if let Some(preview) = app.sailine_point_preview.as_ref().filter(|preview| preview.document == st.doc.id) {
+        return (preview.doc.clone(), (1 << 39) | (preview.key & ((1 << 39) - 1)));
+    }
     if let Some(l) = live_stroke(app, idx) {
         return (l.stroke.doc().clone(), l.display_key());
     }
@@ -1164,11 +1167,8 @@ pub(crate) fn display_doc(app: &mut PhotocraftApp, idx: usize) -> (std::sync::Ar
         && app.session.active_index() == Some(idx)
         && st.doc.layer(photocraft_doc::LayerId(t.layer)).is_some()
     {
-        // SaiLineArt transforms update the selected control points in the live document on every
-        // drag preview. Unlike raster transforms, they do not have a separately warped texture;
-        // displaying `pv.doc` here would keep the canvas frozen at the transform's start state.
         if crate::transform_tool::is_sailine_points_preview(pv) {
-            return (st.doc.clone(), 0);
+            return (pv.doc.clone(), (1 << 40) + pv.session);
         }
         return (pv.doc.clone(), (1 << 40) + pv.session);
     }
@@ -3230,6 +3230,18 @@ pub fn canvas_view(app: &mut PhotocraftApp, ui: &mut egui::Ui, idx: usize, rect:
         None if middle => Tool::Hand,
         None => app.ui.tool,
     };
+    let events = ui.input(|input| input.events.clone());
+    for event in events {
+        if let egui::Event::PointerButton { pos, button, pressed, modifiers } = event
+            && rect.contains(pos)
+        {
+            let doc_pos = xf.to_doc(pos);
+            crate::sailine_ui::trace_click(
+                "raw-canvas",
+                format!("button={button:?} phase={} screen=({:.1},{:.1}) doc=({:.2},{:.2}) modifiers={modifiers:?} tool={tool:?}", if pressed { "down" } else { "up" }, pos.x, pos.y, doc_pos[0], doc_pos[1]),
+            );
+        }
+    }
     // ⌘ held: this frame's gestures go to the Move tool (`PhotocraftApp::active_tool`). The Hand
     // and Zoom never reach `tool_event`, so only the Move needs the state machine to know.
     app.tool_override = (temporary == Some(crate::hold_keys::Temporary::Move)).then_some(Tool::Move);
@@ -3358,6 +3370,12 @@ pub fn canvas_view(app: &mut PhotocraftApp, ui: &mut egui::Ui, idx: usize, rect:
         // (Preferences › Tools, `paint_mouse`).
         crate::paint_mouse::sync_tool_brush(app);
         let mut buttons = crate::paint_mouse::canvas_buttons(app, &response, tool);
+        if crate::sailine_ui::is_sailine_tool(tool) && (buttons.started || buttons.dragged || buttons.stopped || buttons.clicked || response.secondary_clicked()) {
+            crate::sailine_ui::trace_click(
+                "egui-buttons",
+                format!("tool={tool:?} started={} dragged={} stopped={} clicked={} secondary_clicked={} hovered={}", buttons.started, buttons.dragged, buttons.stopped, buttons.clicked, response.secondary_clicked(), response.hovered()),
+            );
+        }
         // The Crop tool's frame is edited from the press (before egui's drag threshold), so the
         // pixels past the canvas show at once, as in Photoshop.
         if tool == Tool::Crop && response.is_pointer_button_down_on() && ui.input(|i| i.pointer.primary_down()) && crate::crop_ui::press(app) {
@@ -3393,6 +3411,17 @@ pub fn canvas_view(app: &mut PhotocraftApp, ui: &mut egui::Ui, idx: usize, rect:
         {
             crate::canvas_tool_menu::open_transform(app, &ctx, [p.x, p.y]);
         }
+        let raw_secondary_press = ui.input(|input| {
+            input.events.iter().find_map(|event| match event {
+                egui::Event::PointerButton {
+                    pos,
+                    button: PointerButton::Secondary,
+                    pressed: true,
+                    modifiers,
+                } if rect.contains(*pos) => Some((*pos, *modifiers)),
+                _ => None,
+            })
+        });
         let sailine_modifier_right_click = response.secondary_clicked()
             && crate::sailine_ui::modifier_right_click_deselects(
                 tool,
@@ -3406,9 +3435,29 @@ pub fn canvas_view(app: &mut PhotocraftApp, ui: &mut egui::Ui, idx: usize, rect:
         }
         // SaiCurve follows the same finish gesture as Enter: a secondary click commits the draft
         // instead of opening a contextual menu.
-        let sailine_finished = response.secondary_clicked() && !sailine_modifier_right_click && matches!(tool, Tool::SaiCurve | Tool::SaiStraight);
+        let sailine_unmodified_right_press = raw_secondary_press.is_some_and(|(_, press_mods)| {
+            matches!(tool, Tool::SaiCurve | Tool::SaiStraight)
+                && !press_mods.ctrl
+                && !press_mods.command
+                && !press_mods.alt
+                && !press_mods.shift
+        });
+        let sailine_finished = sailine_unmodified_right_press
+            || (response.secondary_clicked()
+                && !sailine_modifier_right_click
+                && !matches!(tool, Tool::SaiCurve | Tool::SaiStraight));
+        let raw_secondary = raw_secondary_press.is_some()
+            || ui.input(|input| {
+            input.events.iter().any(|event| matches!(event, egui::Event::PointerButton { pos, button: PointerButton::Secondary, .. } if rect.contains(*pos)))
+        });
+        if raw_secondary || response.secondary_clicked() {
+            crate::sailine_ui::trace_click(
+                "right-click-routing",
+                format!("tool={tool:?} raw_secondary={raw_secondary} raw_press_unmodified={sailine_unmodified_right_press} egui_secondary_clicked={} modifier_deselect={sailine_modifier_right_click} finish_route={sailine_finished} draft_points={}", response.secondary_clicked(), app.ui.sailine.as_ref().map_or(0, |draft| draft.points.len())),
+            );
+        }
         if response.secondary_clicked() && tool == Tool::SaiPressure {
-            app.ui.sailine_pressure_drag = None;
+            crate::sailine_ui::cancel_pressure_drag(app);
             app.ui.sailine_selection = None;
             app.ui.sailine_selections.clear();
         }
@@ -4962,6 +5011,14 @@ fn tool_move(app: &mut PhotocraftApp, x: f64, y: f64, pressure: f32, mods: egui:
 
 /// Tool state machine. Shared by mouse input and automation.
 pub fn tool_event(app: &mut PhotocraftApp, ev: ToolEvent, mods: egui::Modifiers) {
+    if crate::sailine_ui::is_sailine_tool(app.ui.tool) && !matches!(ev, ToolEvent::Move { .. }) {
+        let event = match ev {
+            ToolEvent::Down { x, y, .. } => format!("down doc=({x:.2},{y:.2})"),
+            ToolEvent::Move { x, y, .. } => format!("move doc=({x:.2},{y:.2})"),
+            ToolEvent::Up { x, y } => format!("up doc=({x:.2},{y:.2})"),
+        };
+        crate::sailine_ui::trace_click("tool-event", format!("tool={:?} {event} modifiers={mods:?}", app.ui.tool));
+    }
     if crate::symmetry_ui::pointer(app, ev, crate::workspace_ui::sticky_mods(app, mods)) {
         return;
     }
@@ -5009,7 +5066,11 @@ pub fn tool_event(app: &mut PhotocraftApp, ev: ToolEvent, mods: egui::Modifiers)
     let mods = crate::workspace_ui::sticky_mods(app, mods);
     // SaiLineArt point edits are tool-independent and take priority over each tool's click action.
     // Ctrl+T remains owned by the transform tool above this shared pointer handler.
-    if crate::sailine_ui::shared_pointer(app, ev, mods) {
+    let sailine_shared_handled = crate::sailine_ui::shared_pointer(app, ev, mods);
+    if crate::sailine_ui::is_sailine_tool(app.ui.tool) && matches!(ev, ToolEvent::Down { .. } | ToolEvent::Up { .. }) {
+        crate::sailine_ui::trace_click("shared-pointer-route", format!("handled={sailine_shared_handled}"));
+    }
+    if sailine_shared_handled {
         return;
     }
     // ⌘⌥⌃-click with any tool selects the topmost layer with pixels there (quick_pick.rs); it

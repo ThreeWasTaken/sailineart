@@ -11,7 +11,7 @@
 
 use std::{
     sync::Arc,
-    time::{Duration, Instant},
+    time::Instant,
 };
 
 use egui::{Color32, CursorIcon, Pos2, Stroke, pos2, vec2};
@@ -103,12 +103,16 @@ pub(crate) fn is_sailine_points_preview(preview: &TransformPreview) -> bool {
     preview.sailine_points.is_some()
 }
 
+pub(crate) fn is_sailine_points_gesture(preview: &TransformPreview) -> bool {
+    preview.sailine_points.is_some() && preview.gesture.is_some()
+}
+
 #[derive(Clone)]
 struct SaiLineTransform {
     selections: Vec<crate::sailine_ui::Selection>,
     origins: Vec<[f64; 2]>,
+    paths: Vec<(LayerId, photocraft_doc::LineworkPath)>,
     coalesce: String,
-    last_preview_at: Option<Instant>,
 }
 
 /// What [`follow_edits`] needs to rebuild the preview document.
@@ -341,6 +345,34 @@ fn begin_sailine_points(app: &mut PhotocraftApp, ctx: &egui::Context) -> Result<
     if origins.len() != selections.len() {
         return Err("Some selected SaiLineArt points no longer exist".into());
     }
+    let mut paths = Vec::new();
+    for selection in &selections {
+        if paths.iter().any(|(layer, path): &(LayerId, photocraft_doc::LineworkPath)| *layer == selection.layer && path.id == selection.path) {
+            continue;
+        }
+        if let Some(layer) = doc.layer(selection.layer)
+            && let LayerContent::Linework(linework) = &layer.content
+            && let Some(path) = linework.paths.iter().find(|path| path.id == selection.path)
+        {
+            paths.push((selection.layer, path.clone()));
+        }
+    }
+    paths.sort_by_key(|(layer_id, path)| {
+        doc.layer(*layer_id)
+            .and_then(|layer| match &layer.content {
+                LayerContent::Linework(linework) => linework.paths.iter().position(|candidate| candidate.id == path.id),
+                _ => None,
+            })
+            .unwrap_or(usize::MAX)
+    });
+    let mut preview_doc = (*doc).clone();
+    let mut affected_layers = std::collections::BTreeMap::<LayerId, Vec<u64>>::new();
+    for selection in &selections {
+        affected_layers.entry(selection.layer).or_default().push(selection.path);
+    }
+    for (layer, path_ids) in affected_layers {
+        preview_doc = photocraft_engine::linework_cmds::preview_without_paths(&preview_doc, layer, &path_ids).map_err(|error| error.to_string())?;
+    }
     let min_x = origins.iter().map(|p| p[0]).fold(f64::INFINITY, f64::min);
     let max_x = origins.iter().map(|p| p[0]).fold(f64::NEG_INFINITY, f64::max);
     let min_y = origins.iter().map(|p| p[1]).fold(f64::INFINITY, f64::min);
@@ -356,6 +388,10 @@ fn begin_sailine_points(app: &mut PhotocraftApp, ctx: &egui::Context) -> Result<
     crate::type_tool::commit(app);
     let session = app.ui.alloc_id();
     let layer = selections.first().map_or(0, |s| s.layer.0);
+    let layer_id = LayerId(layer);
+    let max_side = ctx.input(|i| i.max_texture_side).max(app.gpu.as_ref().map_or(1, |gpu| gpu.max_texture_side()));
+    let above = Above::new(ctx, format!("transform-{session}-sailine-above"), &doc, layer_id, max_side);
+    above.hide_in(&mut preview_doc.layers);
     let texture = crate::transform_tex::PreviewTextures::new(
         ctx,
         format!("transform-{session}-sailine"),
@@ -364,10 +400,10 @@ fn begin_sailine_points(app: &mut PhotocraftApp, ctx: &egui::Context) -> Result<
     );
     app.transform_preview = Some(TransformPreview {
         session,
-        doc: doc.clone(),
+        doc: Arc::new(preview_doc.clone()),
         texture,
         opacity: 1.0,
-        above: None,
+        above: Some(above),
         styled: None,
         gesture: None,
         warp_drag: None,
@@ -381,7 +417,7 @@ fn begin_sailine_points(app: &mut PhotocraftApp, ctx: &egui::Context) -> Result<
         follow: None,
         committing: None,
         content_aware: None,
-        sailine_points: Some(SaiLineTransform { selections, origins, coalesce: format!("sailine-transform:{session}"), last_preview_at: None }),
+        sailine_points: Some(SaiLineTransform { selections, origins, paths, coalesce: format!("sailine-transform:{session}"), }),
     });
     app.ui.transform = Some(TransformSession {
         session,
@@ -1570,6 +1606,8 @@ pub fn pointer(app: &mut PhotocraftApp, ev: ToolEvent, mods: egui::Modifiers) ->
 
 fn sailine_pointer(app: &mut PhotocraftApp, ev: ToolEvent, mods: egui::Modifiers, before: TransformSession) -> bool {
     let tol = handle_tolerance(app);
+    let trace = app.stroke_trace.enabled();
+    let input_ms = app.stroke_trace.pointer_age_ms();
     match ev {
         ToolEvent::Down { x, y, .. } => {
             let mut h = hit(&before, [x, y], tol);
@@ -1578,22 +1616,11 @@ fn sailine_pointer(app: &mut PhotocraftApp, ev: ToolEvent, mods: egui::Modifiers
             }
             if let Some(pv) = app.transform_preview.as_mut() {
                 pv.gesture = Some(Gesture { hit: h, start: [x, y], quad0: before.quad, pivot0: before.pivot });
-                if let Some(target) = pv.sailine_points.as_mut() {
-                    target.last_preview_at = None;
-                }
             }
         }
         ToolEvent::Move { x, y, .. } | ToolEvent::Up { x, y } => {
             let Some(g) = app.transform_preview.as_ref().and_then(|pv| pv.gesture) else { return true };
             let released = matches!(ev, ToolEvent::Up { .. });
-            let now = Instant::now();
-            if !released {
-                let Some(target) = app.transform_preview.as_mut().and_then(|pv| pv.sailine_points.as_mut()) else { return true };
-                if target.last_preview_at.is_some_and(|last| now.duration_since(last) < Duration::from_millis(33)) {
-                    return true;
-                }
-                target.last_preview_at = Some(now);
-            }
             if released && accepts_outside_click(g, [x, y], tol) {
                 commit(app);
                 return true;
@@ -1601,6 +1628,7 @@ fn sailine_pointer(app: &mut PhotocraftApp, ev: ToolEvent, mods: egui::Modifiers
             if released && let Some(pv) = app.transform_preview.as_mut() {
                 pv.gesture = None;
             }
+            let preview_started = Instant::now();
             let mut next = before.clone();
             let mut drag_mods = mods;
             drag_mods.command = false;
@@ -1626,11 +1654,27 @@ fn sailine_pointer(app: &mut PhotocraftApp, ev: ToolEvent, mods: egui::Modifiers
                     [g.pivot0[0] + dx * cs - dy * sn, g.pivot0[1] + dx * sn + dy * cs]
                 });
             }
-            if apply_sailine_quad(app, &next) {
-                app.ui.transform = Some(next);
-                if let Some(target) = app.transform_preview.as_mut().and_then(|pv| pv.sailine_points.as_mut()) {
-                    target.last_preview_at = Some(now);
+            if !released && trace {
+                let preview_ms = preview_started.elapsed().as_secs_f64() * 1000.0;
+                app.stroke_trace.sailine_preview(input_ms, preview_ms, app.stroke_trace.pointer_age_ms());
+            }
+            if released {
+                if trace {
+                    let _ = photocraft_engine::linework_cmds::take_last_refresh_timings();
                 }
+                let started = trace.then(Instant::now);
+                let updated = apply_sailine_quad(app, &next);
+                if let Some(started) = started {
+                    let command_ms = started.elapsed().as_secs_f64() * 1000.0;
+                    let pointer_age_ms = app.stroke_trace.pointer_age_ms();
+                    let stages = photocraft_engine::linework_cmds::take_last_refresh_timings();
+                    app.stroke_trace.sailine_update(input_ms, command_ms, pointer_age_ms, stages);
+                }
+                if updated {
+                    app.ui.transform = Some(next);
+                }
+            } else {
+                app.ui.transform = Some(next);
             }
         }
     }
@@ -2359,9 +2403,11 @@ pub fn draw_overlay(app: &PhotocraftApp, painter: &egui::Painter, xf: &ViewXform
             }
             painter.add(clip_to_canvas(mesh, canvas_size(pv), |p| xf.to_screen(p.x, p.y)));
         }
-        if let Some(a) = &pv.above {
-            a.draw(painter, xf);
-        }
+    } else if let Some(target) = &pv.sailine_points {
+        draw_sailine_preview(painter, xf, t, target);
+    }
+    if let Some(a) = &pv.above {
+        a.draw(painter, xf);
     }
     if pv.committing.is_some() {
         return;
@@ -2406,6 +2452,128 @@ pub fn draw_overlay(app: &PhotocraftApp, painter: &egui::Painter, xf: &ViewXform
         // Preferences › Tools › Show Transformation Values off hides it, as in Photoshop (#204).
         if let Some(r) = live_readout(app).filter(|_| app.session.prefs().tools.show_transformation_values) {
             draw_live_readout(painter.ctx(), at, r);
+        }
+    }
+}
+
+fn draw_sailine_preview(painter: &egui::Painter, xf: &ViewXform, t: &TransformSession, target: &SaiLineTransform) {
+    let w = t.rect[2] - t.rect[0];
+    let h = t.rect[3] - t.rect[1];
+    if !(w > 0.0 && h > 0.0) {
+        return;
+    }
+    draw_sailine_paths(painter, xf, &target.paths, &target.selections, |_selection, origin, factor| {
+        let u = (origin[0] - t.rect[0]) / w;
+        let v = (origin[1] - t.rect[1]) / h;
+        let [a, b, c, d] = t.quad;
+        (
+            [
+                a[0] * (1.0 - u) * (1.0 - v) + b[0] * u * (1.0 - v) + c[0] * u * v + d[0] * (1.0 - u) * v,
+                a[1] * (1.0 - u) * (1.0 - v) + b[1] * u * (1.0 - v) + c[1] * u * v + d[1] * (1.0 - u) * v,
+            ],
+            factor,
+        )
+    });
+}
+
+/// Draw direct anchor drags with the same SaiSimplified centerline and pressure-aware renderer as
+/// Ctrl+T. Coordinates are always derived from the drag's immutable origins.
+pub(crate) fn draw_sailine_point_drag_preview(
+    painter: &egui::Painter,
+    xf: &ViewXform,
+    preview: &crate::sailine_ui::PointDragPreview,
+    drag: &crate::sailine_ui::PointDrag,
+    current: [f64; 2],
+) {
+    let delta = [current[0] - drag.start[0], current[1] - drag.start[1]];
+    draw_sailine_paths(painter, xf, &preview.paths, &drag.selections, |_, origin, factor| ([origin[0] + delta[0], origin[1] + delta[1]], factor));
+}
+
+pub(crate) fn draw_sailine_pressure_drag_preview(
+    painter: &egui::Painter,
+    xf: &ViewXform,
+    preview: &crate::sailine_ui::PointDragPreview,
+    drag: &crate::sailine_ui::PointPressureDrag,
+) {
+    let delta = drag.current_factor - drag.start_factor;
+    draw_sailine_paths(painter, xf, &preview.paths, &drag.selections, |selection, position, factor| {
+        let origin = drag.selections.iter().position(|candidate| *candidate == selection).and_then(|index| drag.origins.get(index)).copied().unwrap_or(factor);
+        (position, (origin + delta).clamp(0.0, 2.0))
+    });
+}
+
+fn draw_sailine_paths(
+    painter: &egui::Painter,
+    xf: &ViewXform,
+    paths: &[(LayerId, photocraft_doc::LineworkPath)],
+    selections: &[crate::sailine_ui::Selection],
+    mut transform: impl FnMut(crate::sailine_ui::Selection, [f64; 2], f32) -> ([f64; 2], f32),
+) {
+    for (layer, original) in paths {
+        let mut path = original.clone();
+        for point in &mut path.points {
+            if let Some(selection) = selections.iter().find(|selection| selection.layer == *layer && selection.path == path.id && selection.point == point.id) {
+                (point.position, point.width_factor) = transform(*selection, point.position, point.width_factor);
+            }
+        }
+        let points: Vec<_> = path.points.iter().map(|point| point.position).collect();
+        let pointed: Vec<_> = path.points.iter().map(|point| point.pointed).collect();
+        let Ok(centerline) = photocraft_vector::linework::interpolate_points_with_model_and_pointed(
+            &points,
+            path.handle,
+            photocraft_vector::linework::InterpolationModel::SaiSimplified,
+            &pointed,
+        ) else {
+            continue;
+        };
+        let rgba = path.color.to_rgba8();
+        let color = Color32::from_rgba_unmultiplied(rgba[0], rgba[1], rgba[2], rgba[3]);
+        let to_screen = |p: [f64; 2]| xf.to_screen(p[0] as f32, p[1] as f32);
+        if path.closed {
+            let mean_pressure = path.points.iter().map(|point| point.width_factor).sum::<f32>() / path.points.len().max(1) as f32;
+            let width = (path.width * mean_pressure * xf.zoom).max(0.5);
+            for (line, _) in crate::vector_ui::path_lines(&centerline, &to_screen) {
+                if line.len() >= 2 {
+                    painter.add(egui::Shape::closed_line(line, Stroke::new(width, color)));
+                }
+            }
+        } else {
+            let factors: Vec<_> = path.points.iter().map(|point| point.width_factor).collect();
+            for (index, line) in crate::vector_ui::path_segment_lines(&centerline, &to_screen).into_iter().enumerate() {
+                let Some(start) = factors.get(index) else { continue };
+                let end = factors.get(index + 1).copied().unwrap_or(*start);
+                if line.len() < 2 {
+                    continue;
+                }
+                let start_radius = path.width * *start * xf.zoom * 0.5;
+                if start_radius > 0.0 && let Some(first) = line.first() {
+                    painter.circle_filled(*first, start_radius, color);
+                }
+                let lengths: Vec<_> = line.windows(2).map(|pair| pair[0].distance(pair[1])).collect();
+                let total = lengths.iter().sum::<f32>().max(f32::EPSILON);
+                let mut travelled = 0.0;
+                for (pair, length) in line.windows(2).zip(lengths) {
+                    let t0 = travelled / total;
+                    travelled += length;
+                    let t1 = travelled / total;
+                    let f0 = *start + (end - *start) * t0;
+                    let f1 = *start + (end - *start) * t1;
+                    let width = (path.width * (f0 + f1) * 0.5 * xf.zoom).max(0.0);
+                    if width > 0.0 {
+                        painter.line_segment([pair[0], pair[1]], Stroke::new(width, color));
+                    }
+                    let radius = path.width * f1 * xf.zoom * 0.5;
+                    if radius > 0.0 {
+                        painter.circle_filled(pair[1], radius, color);
+                    }
+                }
+            }
+        }
+        let accent = crate::theme::Tokens::get(painter.ctx()).accent;
+        for selection in selections.iter().filter(|selection| selection.layer == *layer && selection.path == path.id) {
+            if let Some(point) = path.points.iter().find(|point| point.id == selection.point) {
+                crate::vector_ui::draw_anchor(painter, xf.to_screen(point.position[0] as f32, point.position[1] as f32), true, accent);
+            }
         }
     }
 }
@@ -3970,8 +4138,11 @@ mod tests {
         sailine_pointer(&mut app, ToolEvent::Move { x: 25.0, y: 17.0, pressure: 1.0 }, egui::Modifiers::NONE, current);
         let shown = crate::canvas::display_doc(&mut app, 0).0;
         let photocraft_doc::LayerContent::Linework(shown_linework) = &shown.layer(layer).unwrap().content else { panic!("linework expected") };
-        assert_eq!(shown_linework.paths[0].points[0].position, [15.0, 17.0], "canvas preview follows the selected control point before validation");
-        assert_eq!(shown_linework.paths[0].points[1].position, [35.0, 17.0]);
+        assert!(shown_linework.paths.is_empty(), "the temporary canvas document omits affected paths to avoid a ghost under the vector preview");
+        let persistent = app.session.active().unwrap();
+        let LayerContent::Linework(persistent_linework) = &persistent.doc.layer(layer).unwrap().content else { panic!("linework expected") };
+        assert_eq!(persistent_linework.paths[0].points[0].position, [10.0, 10.0], "pointer movement does not mutate the persistent document");
+        assert_eq!(persistent_linework.paths[0].points[1].position, [30.0, 10.0]);
         let current = app.ui.transform.clone().unwrap();
         sailine_pointer(&mut app, ToolEvent::Up { x: 25.0, y: 17.0 }, egui::Modifiers::NONE, current);
         commit(&mut app);

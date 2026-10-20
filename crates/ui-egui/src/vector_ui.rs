@@ -904,6 +904,29 @@ pub(crate) fn path_lines(path: &Path, xf: &dyn Fn([f64; 2]) -> Pos2) -> Vec<(Vec
         .collect()
 }
 
+/// Screen-space samples split at the original path's cubic segments, for previews whose stroke
+/// width varies between anchors.
+pub(crate) fn path_segment_lines(path: &Path, xf: &dyn Fn([f64; 2]) -> Pos2) -> Vec<Vec<Pos2>> {
+    path.subpaths
+        .iter()
+        .flat_map(|subpath| {
+            let n = subpath.knots.len();
+            let segments = if subpath.closed { n } else { n.saturating_sub(1) };
+            (0..segments).map(move |index| {
+                let Some(a) = subpath.knots.get(index) else { return Vec::new() };
+                let Some(b) = subpath.knots.get((index + 1) % n) else { return Vec::new() };
+                curve_points(
+                    [a.anchor.x, a.anchor.y],
+                    [a.out_ctrl.x, a.out_ctrl.y],
+                    [b.in_ctrl.x, b.in_ctrl.y],
+                    [b.anchor.x, b.anchor.y],
+                    xf,
+                )
+            })
+        })
+        .collect()
+}
+
 /// A path's outline in the accent colour.
 pub(crate) fn draw_outline(painter: &egui::Painter, p: &Path, to_scr: &dyn Fn([f64; 2]) -> Pos2, accent: Color32) {
     for (pts, closed) in path_lines(p, to_scr) {

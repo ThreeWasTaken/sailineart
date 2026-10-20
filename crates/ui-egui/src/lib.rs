@@ -658,6 +658,8 @@ pub struct PhotocraftApp {
     pub(crate) hist_job: Option<HistJob>,
     /// Free Transform preview (document without the moving pixels + their texture).
     pub(crate) transform_preview: Option<transform_tool::TransformPreview>,
+    /// Temporary raster document plus vector paths for a direct SaiLineArt point drag.
+    pub(crate) sailine_point_preview: Option<sailine_ui::PointDragPreview>,
     /// Move-tool ⇧/⌥ drag state (move_mods).
     pub(crate) move_mods: move_mods::MoveDrag,
     /// Cached document for a modal text Style Options color preview.
@@ -859,6 +861,7 @@ impl PhotocraftApp {
             clip_external: false,
             clip_read_for_paste: false,
             transform_preview: None,
+            sailine_point_preview: None,
             move_mods: Default::default(),
             style_preview: None,
             text_style_preview: None,
@@ -1941,7 +1944,9 @@ impl eframe::App for PhotocraftApp {
             let info = &self.perf.gpu_info;
             self.stroke_trace.end_frame(
                 ui_ms,
-                self.live_stroke.is_some() || self.ui.sailine_point_drag.is_some(),
+                self.live_stroke.is_some()
+                    || self.ui.sailine_point_drag.is_some()
+                    || self.transform_preview.as_ref().is_some_and(transform_tool::is_sailine_points_gesture),
                 || format!("{} {}", info.backend, info.adapter).trim().to_string(),
             );
         }
