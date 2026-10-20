@@ -4,6 +4,8 @@ SaiLineArt est l’éditeur de tracés vectoriels de PhotoCraft inspiré du Line
 
 Dans ce document, **SaiLineArt** désigne l’ensemble de la famille d’outils ; **SaiLine** est l’outil de création de segments droits. Ce document décrit le comportement présent dans PhotoCraft. Les ressemblances avec SAI sont signalées comme observées ou validées avec les références disponibles ; elles ne signifient pas que la formule propriétaire de SAI a été retrouvée.
 
+Pour l’architecture, les mesures de performance, les limites connues et les étapes de reprise du développement, consulter le [dossier développeur SaiLineArt](sailineart-development.md).
+
 ## Vue d’ensemble
 
 SaiLineArt regroupe sept outils qui éditent le même modèle de tracé :
