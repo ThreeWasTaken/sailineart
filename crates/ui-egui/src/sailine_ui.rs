@@ -479,12 +479,28 @@ pub fn shared_pointer(app: &mut PhotocraftApp, ev: crate::canvas::ToolEvent, mod
 
 pub fn drag_to(app: &mut PhotocraftApp, point: [f64; 2]) -> bool {
     let Some(drag) = app.ui.sailine_point_drag.as_mut() else { return false };
+    let trace = app.stroke_trace.enabled();
+    let input_ms = app.stroke_trace.pointer_age_ms();
+    let started = trace.then(Instant::now);
     drag.pending_point = Some(point);
     if drag.rendered_point == Some(point) {
+        if trace {
+            app.stroke_trace.sailine_update(input_ms, 0.0, app.stroke_trace.pointer_age_ms(), None);
+        }
         return true;
     }
     drag.rendered_point = Some(point);
-    render_drag(app, point)
+    if trace {
+        let _ = photocraft_engine::linework_cmds::take_last_refresh_timings();
+    }
+    let rendered = render_drag(app, point);
+    if let Some(started) = started {
+        let command_ms = started.elapsed().as_secs_f64() * 1000.0;
+        let pointer_age_ms = app.stroke_trace.pointer_age_ms();
+        let stages = photocraft_engine::linework_cmds::take_last_refresh_timings();
+        app.stroke_trace.sailine_update(input_ms, command_ms, pointer_age_ms, stages);
+    }
+    rendered
 }
 
 fn render_drag(app: &mut PhotocraftApp, point: [f64; 2]) -> bool {

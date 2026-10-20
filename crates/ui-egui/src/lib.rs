@@ -1682,6 +1682,8 @@ impl PhotocraftApp {
 
 impl eframe::App for PhotocraftApp {
     fn logic(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        let trace_logic_started = self.stroke_trace.enabled().then(std::time::Instant::now);
+        self.stroke_trace.completed_frame_cpu(frame.info().cpu_usage);
         i18n::set_current(i18n::Lang::from_pref(&self.session.prefs().interface.language));
         // Caps Lock state read from the OS once per frame (see `Services::caps_lock`): the canvas
         // cursor block needs it before the frame renders. `None` (Wayland/web) keeps `false`.
@@ -1763,9 +1765,13 @@ impl eframe::App for PhotocraftApp {
             ctx.request_repaint_after(std::time::Duration::from_millis(16));
         }
         self.poll_file_dialog(ctx, Some(frame));
+        if let Some(started) = trace_logic_started {
+            self.stroke_trace.logic_ms(started.elapsed().as_secs_f64() * 1000.0);
+        }
     }
 
     fn raw_input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+        let trace_hook_started = self.stroke_trace.enabled().then(std::time::Instant::now);
         let frame_start = gpu_canvas::now_ms();
         // An undecorated window gets its caption back when the toolkit changes its flags
         // (maximize, restore, …): take it off again before the frame is laid out (#2246).
@@ -1793,7 +1799,13 @@ impl eframe::App for PhotocraftApp {
         if self.stroke_trace.enabled() {
             // The OS's moves and the control channel's (injected just above).
             let moves = raw_input.events.iter().filter(|e| matches!(e, egui::Event::PointerMoved(_))).count();
+            if raw_input.events.iter().any(|e| matches!(e, egui::Event::PointerMoved(_) | egui::Event::PointerButton { .. } | egui::Event::Touch { .. })) {
+                self.stroke_trace.pointer_event();
+            }
             self.stroke_trace.begin_frame(frame_start, moves);
+            if let Some(started) = trace_hook_started {
+                self.stroke_trace.raw_hook_ms(started.elapsed().as_secs_f64() * 1000.0);
+            }
         }
     }
 
@@ -1809,7 +1821,11 @@ impl eframe::App for PhotocraftApp {
         }
         let t0 = gpu_canvas::now_ms();
         self.perf.frame_refresh_ms = 0.0;
-        self.stroke_trace.cpu_prev(frame.info().cpu_usage);
+        self.perf.frame_composite_ms = 0.0;
+        self.perf.frame_upload_ms = 0.0;
+        self.perf.frame_refreshes = 0;
+        self.perf.frame_refreshed_pixels = 0;
+        self.perf.frame_gpu_uploads = 0;
         // A text field's right-click menu, before any field is drawn (text_field_menu.rs).
         text_field_menu::show(&ctx);
         // Each painting tool keeps its own brush (#218), so switch the active tool's brush in
@@ -1915,8 +1931,19 @@ impl eframe::App for PhotocraftApp {
         self.perf.frame(ui_ms);
         if self.stroke_trace.enabled() {
             self.stroke_trace.canvas(self.perf.frame_refresh_ms);
+            self.stroke_trace.canvas_details(
+                self.perf.frame_composite_ms,
+                self.perf.frame_upload_ms,
+                self.perf.frame_refreshes,
+                self.perf.frame_refreshed_pixels,
+                self.perf.frame_gpu_uploads,
+            );
             let info = &self.perf.gpu_info;
-            self.stroke_trace.end_frame(ui_ms, self.live_stroke.is_some(), || format!("{} {}", info.backend, info.adapter).trim().to_string());
+            self.stroke_trace.end_frame(
+                ui_ms,
+                self.live_stroke.is_some() || self.ui.sailine_point_drag.is_some(),
+                || format!("{} {}", info.backend, info.adapter).trim().to_string(),
+            );
         }
         // Synthetic input is injected one press/release step per frame: keep frames coming until
         // the queue is empty, then release control replies waiting on it.

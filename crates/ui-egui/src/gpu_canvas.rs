@@ -901,6 +901,17 @@ pub struct Perf {
     /// Composite and upload time of this frame's canvas refreshes, in ms (the stroke trace).
     #[serde(skip)]
     pub(crate) frame_refresh_ms: f64,
+    /// Per-frame refresh detail used by the optional interaction trace.
+    #[serde(skip)]
+    pub(crate) frame_composite_ms: f64,
+    #[serde(skip)]
+    pub(crate) frame_upload_ms: f64,
+    #[serde(skip)]
+    pub(crate) frame_refreshes: u64,
+    #[serde(skip)]
+    pub(crate) frame_refreshed_pixels: u64,
+    #[serde(skip)]
+    pub(crate) frame_gpu_uploads: u64,
 }
 
 /// What the app renders with and why (Help › System Info, Preferences › Performance, the `perf`
@@ -1016,6 +1027,10 @@ pub fn backend_name(b: wgpu::Backend) -> &'static str {
 impl Perf {
     pub fn record(&mut self, kind: &'static str, px: u64, composite_ms: f64, upload_ms: f64) {
         self.frame_refresh_ms += composite_ms + upload_ms;
+        self.frame_composite_ms += composite_ms;
+        self.frame_upload_ms += upload_ms;
+        self.frame_refreshes += 1;
+        self.frame_refreshed_pixels = self.frame_refreshed_pixels.saturating_add(px);
         self.last_refresh = kind;
         self.last_refresh_px = px;
         self.composite_ms = composite_ms;

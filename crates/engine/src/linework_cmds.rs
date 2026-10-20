@@ -8,6 +8,7 @@ use photocraft_doc::{Layer, LayerContent, LineworkLayer, LineworkPath, LineworkP
 use photocraft_raster::Surface;
 use photocraft_vector as vector;
 use serde_json::{Value, json};
+use std::time::Instant;
 
 use crate::commands::CommandSpec;
 use crate::{EngineError, Result, Session};
@@ -27,6 +28,36 @@ const POINTED_CMD: &str = "linework.setPointPointed";
 const COMBINE_CMD: &str = "linework.combinePaths";
 const INTERPOLATION_CMD: &str = "linework.setInterpolation";
 const MAX_POINTS: usize = 4096;
+
+/// Stages of one Linework cache refresh, available only to the interactive latency trace.
+/// `shape_build_ms` includes centerline interpolation and variable-width contour construction;
+/// those are currently a single vector API call.
+#[derive(Clone, Copy, Debug, Default, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LineworkRefreshTimings {
+    pub snapshot_clone_ms: f64,
+    pub shape_build_ms: f64,
+    pub raster_ms: f64,
+    pub path_cache_ms: f64,
+    pub damage_bounds_ms: f64,
+    pub composition_ms: f64,
+    pub writeback_ms: f64,
+    pub refresh_total_ms: f64,
+}
+
+thread_local! {
+    static LAST_REFRESH_TIMINGS: std::cell::RefCell<Option<LineworkRefreshTimings>> = const { std::cell::RefCell::new(None) };
+}
+
+fn linework_trace_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("PHOTOCRAFT_STROKE_TRACE").is_some_and(|value| !value.is_empty()))
+}
+
+/// Take the cache timing produced by the most recent linework command on this thread.
+pub fn take_last_refresh_timings() -> Option<LineworkRefreshTimings> {
+    LAST_REFRESH_TIMINGS.with(|last| last.borrow_mut().take())
+}
 
 type PointTarget = (photocraft_doc::LayerId, u64, u64, Option<f32>);
 
@@ -173,6 +204,74 @@ fn composite_cache(rect: photocraft_geom::Rect, base: Option<Surface>, overlay: 
     result
 }
 
+/// Bounds of pixels whose samples differ in two equally formatted surfaces, clipped to `limit`.
+/// Reusing row buffers keeps this exact comparison bounded in memory even for long diagonal
+/// strokes whose conservative old/new bounds cover a large rectangle.
+fn surface_diff_bounds(a: &Surface, b: &Surface, limit: photocraft_geom::Rect) -> photocraft_geom::Rect {
+    if limit.is_empty() {
+        return photocraft_geom::Rect::EMPTY;
+    }
+    if a.format() != b.format() {
+        return limit;
+    }
+    // Linework raster caches are transparent-zero Surfaces. Compare their encoded tile samples
+    // directly so discovering a small dirty spot inside a large diagonal AABB does not itself
+    // allocate and convert millions of floats. Non-zero-default surfaces use the general path.
+    if a.default_pixel().iter().all(|sample| *sample == 0.0) && b.default_pixel().iter().all(|sample| *sample == 0.0) {
+        let bytes_per_pixel = a.format().bytes_per_pixel();
+        let zero = vec![0u8; bytes_per_pixel];
+        let (mut x0, mut y0, mut x1, mut y1) = (limit.x1, limit.y1, limit.x0, limit.y0);
+        let mut different = false;
+        for coord in limit.tiles() {
+            let rect = coord.rect().intersect(&limit);
+            let left = a.tile(coord).map(|tile| tile.bytes());
+            let right = b.tile(coord).map(|tile| tile.bytes());
+            if a.tile(coord).zip(b.tile(coord)).is_some_and(|(l, r)| std::sync::Arc::ptr_eq(l, r)) {
+                continue;
+            }
+            for y in rect.y0..rect.y1 {
+                let row_offset = ((y - coord.ty * photocraft_geom::TILE_SIZE) * photocraft_geom::TILE_SIZE
+                    + (rect.x0 - coord.tx * photocraft_geom::TILE_SIZE)) as usize
+                    * bytes_per_pixel;
+                for x in rect.x0..rect.x1 {
+                    let offset = row_offset + (x - rect.x0) as usize * bytes_per_pixel;
+                    let l = left.map_or(&zero[..bytes_per_pixel], |bytes| &bytes[offset..offset + bytes_per_pixel]);
+                    let r = right.map_or(&zero[..bytes_per_pixel], |bytes| &bytes[offset..offset + bytes_per_pixel]);
+                    if l != r {
+                        x0 = x0.min(x);
+                        x1 = x1.max(x + 1);
+                        y0 = y0.min(y);
+                        y1 = y1.max(y + 1);
+                        different = true;
+                    }
+                }
+            }
+        }
+        return if different { photocraft_geom::Rect::new(x0, y0, x1, y1) } else { photocraft_geom::Rect::EMPTY };
+    }
+    let channels = a.channels();
+    let mut a_row = Vec::new();
+    let mut b_row = Vec::new();
+    let (mut x0, mut y0, mut x1, mut y1) = (limit.x1, limit.y1, limit.x0, limit.y0);
+    let mut different = false;
+    for y in limit.y0..limit.y1 {
+        let row = photocraft_geom::Rect::new(limit.x0, y, limit.x1, y + 1);
+        a.read_region_into(row, &mut a_row);
+        b.read_region_into(row, &mut b_row);
+        for (x, (left, right)) in a_row.chunks_exact(channels).zip(b_row.chunks_exact(channels)).enumerate() {
+            if left != right {
+                let x = limit.x0 + x as i32;
+                x0 = x0.min(x);
+                x1 = x1.max(x + 1);
+                y0 = y0.min(y);
+                y1 = y1.max(y + 1);
+                different = true;
+            }
+        }
+    }
+    if different { photocraft_geom::Rect::new(x0, y0, x1, y1) } else { photocraft_geom::Rect::EMPTY }
+}
+
 /// Exact cache-compositor entry point used only by the headless SaiLineArt performance harness.
 #[cfg(feature = "sailine-bench")]
 pub fn bench_composite_cache(rect: photocraft_geom::Rect, base: Option<Surface>, overlay: &LineworkPathCache) -> Surface {
@@ -184,17 +283,80 @@ fn refresh_linework_cache(
     layer_id: photocraft_doc::LayerId,
     changed_paths: &[u64],
     model: vector::linework::InterpolationModel,
-) -> Result<()> {
+) -> Result<photocraft_geom::Rect> {
+    let trace = linework_trace_enabled();
+    let total_started = trace.then(Instant::now);
+    let snapshot_started = trace.then(Instant::now);
     let (paths, mut path_caches, previous_cache) = {
         let layer = doc.layer(layer_id).ok_or(EngineError::NoLayer(layer_id))?;
         let LayerContent::Linework(linework) = &layer.content else { return Err(EngineError::Other("layer is not Linework".into())) };
         (linework.paths.clone(), linework.path_caches.clone(), linework.cache.clone())
     };
+    let mut timings = LineworkRefreshTimings::default();
+    if let Some(started) = snapshot_started {
+        timings.snapshot_clone_ms = started.elapsed().as_secs_f64() * 1000.0;
+    }
     let bounds = doc.bounds();
     let format = doc.pixel_format();
     let changed: std::collections::BTreeSet<_> = changed_paths.iter().copied().collect();
     let valid: std::collections::BTreeSet<_> = paths.iter().map(|path| path.id).collect();
     let can_patch = previous_cache.is_some() && paths.iter().all(|path| path_caches.contains_key(&path.id));
+
+    // A one-path Linework layer is already the final layer image. Keep the compact per-path cache
+    // for the existing snapshot/undo and cache-reuse behavior, but do not blend it back into a
+    // second Surface: the former is an exact round trip followed by a needless composition.
+    // Multi-path layers keep the compositor below to preserve overlap order and alpha blending.
+    if paths.len() == 1 {
+        let path = &paths[0];
+        if !changed.contains(&path.id) && previous_cache.is_some() {
+            return Ok(photocraft_geom::Rect::EMPTY);
+        }
+        let points: Vec<[f64; 2]> = path.points.iter().map(|point| point.position).collect();
+        let factors: Vec<f32> = path.points.iter().map(|point| point.width_factor).collect();
+        let pointed: Vec<bool> = path.points.iter().map(|point| point.pointed).collect();
+        let shape_started = trace.then(Instant::now);
+        let mut shape = render_shape(&points, &factors, path.color, path.width, path.handle, model, &pointed, path.closed)?;
+        if let Some(started) = shape_started {
+            timings.shape_build_ms = started.elapsed().as_secs_f64() * 1000.0;
+        }
+        let raster_started = trace.then(Instant::now);
+        crate::vector_cmds::refresh_shape(doc, &mut shape);
+        if let Some(started) = raster_started {
+            timings.raster_ms = started.elapsed().as_secs_f64() * 1000.0;
+        }
+        let cache = shape.cache.ok_or(EngineError::Other("linework render cache missing".into()))?;
+        let path_cache_started = trace.then(Instant::now);
+        let path_cache = LineworkPathCache::from_surface(&cache);
+        if let Some(started) = path_cache_started {
+            timings.path_cache_ms = started.elapsed().as_secs_f64() * 1000.0;
+        }
+        let damage_started = trace.then(Instant::now);
+        let damage = if let Some(previous) = &previous_cache {
+            let old_bounds = path_caches.get(&path.id).map_or_else(|| previous.content_bounds(), |old| old.bounds);
+            let new_bounds = path_cache.bounds;
+            let limit = bounds.intersect(&old_bounds.union(&new_bounds));
+            surface_diff_bounds(previous, &cache, limit)
+        } else {
+            bounds.intersect(&cache.content_bounds())
+        };
+        if let Some(started) = damage_started {
+            timings.damage_bounds_ms = started.elapsed().as_secs_f64() * 1000.0;
+        }
+        let writeback_started = trace.then(Instant::now);
+        let layer = doc.layer_mut(layer_id).ok_or(EngineError::NoLayer(layer_id))?;
+        let LayerContent::Linework(linework) = &mut layer.content else { return Err(EngineError::Other("layer is not Linework".into())) };
+        linework.cache = Some(cache);
+        path_caches.clear();
+        path_caches.insert(path.id, path_cache);
+        linework.path_caches = path_caches;
+        if let Some(started) = writeback_started {
+            timings.writeback_ms = started.elapsed().as_secs_f64() * 1000.0;
+            timings.refresh_total_ms = total_started.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+            LAST_REFRESH_TIMINGS.with(|last| *last.borrow_mut() = Some(timings));
+        }
+        return Ok(damage);
+    }
+
     let mut damage = photocraft_geom::Rect::EMPTY;
     if can_patch {
         for id in changed_paths {
@@ -211,16 +373,29 @@ fn refresh_linework_cache(
         let points: Vec<[f64; 2]> = path.points.iter().map(|point| point.position).collect();
         let factors: Vec<f32> = path.points.iter().map(|point| point.width_factor).collect();
         let pointed: Vec<bool> = path.points.iter().map(|point| point.pointed).collect();
+        let shape_started = trace.then(Instant::now);
         let mut shape = render_shape(&points, &factors, path.color, path.width, path.handle, model, &pointed, path.closed)?;
+        if let Some(started) = shape_started {
+            timings.shape_build_ms += started.elapsed().as_secs_f64() * 1000.0;
+        }
+        let raster_started = trace.then(Instant::now);
         crate::vector_cmds::refresh_shape(doc, &mut shape);
+        if let Some(started) = raster_started {
+            timings.raster_ms += started.elapsed().as_secs_f64() * 1000.0;
+        }
         let rendered_surface = shape.cache.ok_or(EngineError::Other("linework render cache missing".into()))?;
+        let path_cache_started = trace.then(Instant::now);
         let rendered = LineworkPathCache::from_surface(&rendered_surface);
+        if let Some(started) = path_cache_started {
+            timings.path_cache_ms += started.elapsed().as_secs_f64() * 1000.0;
+        }
         if can_patch && changed.contains(&path.id) {
             damage = damage.union(&rendered.bounds);
         }
         path_caches.insert(path.id, rendered);
     }
     let region = if can_patch { bounds.intersect(&damage) } else { bounds };
+    let composition_started = trace.then(Instant::now);
     let mut cache = None;
     if !region.is_empty() {
         for path in paths {
@@ -238,11 +413,20 @@ fn refresh_linework_cache(
     } else {
         cache
     };
+    if let Some(started) = composition_started {
+        timings.composition_ms = started.elapsed().as_secs_f64() * 1000.0;
+    }
+    let writeback_started = trace.then(Instant::now);
     let layer = doc.layer_mut(layer_id).ok_or(EngineError::NoLayer(layer_id))?;
     let LayerContent::Linework(linework) = &mut layer.content else { return Err(EngineError::Other("layer is not Linework".into())) };
     linework.cache = cache;
     linework.path_caches = path_caches;
-    Ok(())
+    if let Some(started) = writeback_started {
+        timings.writeback_ms = started.elapsed().as_secs_f64() * 1000.0;
+        timings.refresh_total_ms = total_started.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+        LAST_REFRESH_TIMINGS.with(|last| *last.borrow_mut() = Some(timings));
+    }
+    Ok(region)
 }
 
 /// Rebuild the transient Linework render cache before operations that need its pixel output.
@@ -257,7 +441,8 @@ pub(crate) fn ensure_rendered(doc: &mut photocraft_doc::Document, layer_id: phot
         }
         linework.paths.iter().map(|path| path.id).collect::<Vec<_>>()
     };
-    refresh_linework_cache(doc, layer_id, &path_ids, vector::linework::InterpolationModel::SaiSimplified)
+    refresh_linework_cache(doc, layer_id, &path_ids, vector::linework::InterpolationModel::SaiSimplified)?;
+    Ok(())
 }
 
 fn create(s: &mut Session, p: &Value) -> Result<Value> {
@@ -329,7 +514,7 @@ fn move_point(s: &mut Session, p: &Value) -> Result<Value> {
     if !x.is_finite() || !y.is_finite() || x.abs() > 1_000_000.0 || y.abs() > 1_000_000.0 {
         return Err(EngineError::BadParams { cmd: MOVE_CMD.into(), msg: "point coordinates must be finite and within ±1000000 px".into() });
     }
-    s.edit("Move Linework Point", |doc, _| {
+    let damage = s.edit("Move Linework Point", |doc, _| {
         {
             let photocraft_doc::LayerContent::Linework(linework) = &mut doc.layer_mut(layer).ok_or(EngineError::NoLayer(layer))?.content else {
                 return Err(EngineError::Other("layer is not Linework".into()));
@@ -338,9 +523,11 @@ fn move_point(s: &mut Session, p: &Value) -> Result<Value> {
             let point = path.points.iter_mut().find(|point| point.id == point_id).ok_or_else(|| EngineError::Other("linework point not found".into()))?;
             point.position = [x, y];
         };
-        refresh_linework_cache(doc, layer, &[path_id], model)?;
-        Ok(())
+        refresh_linework_cache(doc, layer, &[path_id], model)
     })?;
+    if let Some(state) = s.active_mut() {
+        state.last_damage = Some(damage);
+    }
     Ok(json!({"layer": layer.0, "path": path_id, "point": point_id, "x": x, "y": y}))
 }
 
@@ -378,7 +565,7 @@ fn move_points(s: &mut Session, p: &Value) -> Result<Value> {
         }
         moves.push((layer, path, point, x, y));
     }
-    s.edit("Move Linework Points", |doc, _| {
+    let damage = s.edit("Move Linework Points", |doc, _| {
         let mut layers: std::collections::BTreeMap<photocraft_doc::LayerId, Vec<u64>> = Default::default();
         for (layer_id, path_id, point_id, x, y) in &moves {
             let layer = doc.layer_mut(*layer_id).ok_or(EngineError::NoLayer(*layer_id))?;
@@ -391,11 +578,15 @@ fn move_points(s: &mut Session, p: &Value) -> Result<Value> {
                 changed.push(*path_id);
             }
         }
+        let mut damage = photocraft_geom::Rect::EMPTY;
         for (layer, paths) in layers {
-            refresh_linework_cache(doc, layer, &paths, model)?;
+            damage = damage.union(&refresh_linework_cache(doc, layer, &paths, model)?);
         }
-        Ok(())
+        Ok(damage)
     })?;
+    if let Some(state) = s.active_mut() {
+        state.last_damage = Some(damage);
+    }
     Ok(json!({"count": moves.len()}))
 }
 
@@ -969,4 +1160,74 @@ pub fn specs() -> Vec<CommandSpec> {
             journal: true,
         },
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn one_path_cache_matches_compact_composition_and_reports_exact_pixel_damage() {
+        let mut session = Session::new();
+        session.execute("file.new", json!({"width":320,"height":240})).unwrap();
+        let created = session.execute("linework.create", json!({
+            "points":[[24.0,38.0],[142.0,104.0],[278.0,54.0]],
+            "width":30.0,
+            "widthFactors":[0.0,2.0,1.0],
+            "color":"#193f87"
+        })).unwrap();
+        let layer = photocraft_doc::LayerId(created["layer"].as_u64().unwrap());
+        let (path, point) = {
+            let doc = &session.active().unwrap().doc;
+            let LayerContent::Linework(linework) = &doc.layer(layer).unwrap().content else { panic!("expected Linework") };
+            (linework.paths[0].id, linework.paths[0].points[1].id)
+        };
+        let (before, original_path_pixels) = {
+            let doc = &session.active().unwrap().doc;
+            let LayerContent::Linework(linework) = &doc.layer(layer).unwrap().content else { panic!("expected Linework") };
+            (linework.cache.clone().unwrap(), linework.path_caches[&path].pixels.clone())
+        };
+        let old_compact_roundtrip = LineworkPathCache::from_surface(&before).to_surface();
+        assert_eq!(before.content_bounds(), old_compact_roundtrip.content_bounds());
+        assert_eq!(before.read_region(before.content_bounds()), old_compact_roundtrip.read_region(before.content_bounds()));
+
+        session.execute("linework.movePoint", json!({
+            "layer":layer.0,"path":path,"point":point,"x":151.0,"y":112.0,
+            "interpolation":"saiSimplified"
+        })).unwrap();
+        let (after, after_path_pixels, actual_damage, doc_bounds) = {
+            let state = session.active().unwrap();
+            let LayerContent::Linework(linework) = &state.doc.layer(layer).unwrap().content else { panic!("expected Linework") };
+            (linework.cache.clone().unwrap(), linework.path_caches[&path].pixels.clone(), state.last_damage.unwrap(), state.doc.bounds())
+        };
+        assert_eq!(actual_damage, surface_diff_bounds(&before, &after, doc_bounds));
+        let full = LineworkPathCache::from_surface(&after).to_surface();
+        assert_eq!(after.content_bounds(), full.content_bounds());
+        assert_eq!(after.read_region(doc_bounds), full.read_region(doc_bounds));
+        let before_pixels = before.read_region(doc_bounds);
+        let after_pixels = after.read_region(doc_bounds);
+        let channels = before.channels();
+        for (index, (left, right)) in before_pixels.chunks_exact(channels).zip(after_pixels.chunks_exact(channels)).enumerate() {
+            if left != right {
+                let x = doc_bounds.x0 + (index % doc_bounds.width() as usize) as i32;
+                let y = doc_bounds.y0 + (index / doc_bounds.width() as usize) as i32;
+                assert!(actual_damage.contains(x, y), "changed pixel ({x},{y}) is outside reported damage {actual_damage:?}");
+            }
+        }
+
+        assert!(session.undo());
+        {
+            let state = session.active().unwrap();
+            let LayerContent::Linework(linework) = &state.doc.layer(layer).unwrap().content else { panic!("expected Linework") };
+            assert_eq!(linework.cache.as_ref().unwrap(), &before);
+            assert!(std::sync::Arc::ptr_eq(&linework.path_caches[&path].pixels, &original_path_pixels));
+        }
+        assert!(session.redo());
+        {
+            let state = session.active().unwrap();
+            let LayerContent::Linework(linework) = &state.doc.layer(layer).unwrap().content else { panic!("expected Linework") };
+            assert_eq!(linework.cache.as_ref().unwrap(), &after);
+            assert!(std::sync::Arc::ptr_eq(&linework.path_caches[&path].pixels, &after_path_pixels));
+        }
+    }
 }

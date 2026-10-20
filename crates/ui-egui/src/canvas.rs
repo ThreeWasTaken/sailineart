@@ -697,12 +697,15 @@ fn feed_live_stroke(app: &mut PhotocraftApp) {
         return;
     }
     l.fed = d.points.len();
+    let input_age_ms = app.stroke_trace.enabled().then(|| app.stroke_trace.pointer_age_ms()).flatten();
     let started = crate::gpu_canvas::now_ms();
     match l.stroke.push(&pts) {
         Ok(r) => l.damage.push(r),
         Err(_) => app.live_stroke = None,
     }
-    app.stroke_trace.stroke(crate::gpu_canvas::now_ms() - started);
+    if app.stroke_trace.enabled() {
+        app.stroke_trace.native_update(input_age_ms, crate::gpu_canvas::now_ms() - started);
+    }
 }
 
 /// The points the live retouching stroke has rendered.
@@ -1610,6 +1613,7 @@ fn ensure_gpu(app: &mut PhotocraftApp, ctx: &egui::Context, idx: usize, visible:
         if let Some(r) = crate::adjust_preview::uncovered(app, id, raw_key, visible) {
             let r = gpu.refresh(id.0, &doc, Some(r), display.as_deref());
             app.perf.record(r.kind, r.px, r.composite_ms, r.upload_ms);
+            app.perf.frame_gpu_uploads = app.perf.frame_gpu_uploads.saturating_add(r.uploads);
         }
         return true;
     }
@@ -1652,6 +1656,7 @@ fn ensure_gpu(app: &mut PhotocraftApp, ctx: &egui::Context, idx: usize, visible:
     }
     if r.kind.starts_with("gpu") {
         app.perf.gpu_uploads = r.uploads;
+        app.perf.frame_gpu_uploads = app.perf.frame_gpu_uploads.saturating_add(r.uploads);
     } else {
         app.perf.gpu_fallback = r.fallback;
     }
@@ -2965,6 +2970,7 @@ pub fn canvas_view(app: &mut PhotocraftApp, ui: &mut egui::Ui, idx: usize, rect:
             };
             paint_gpu_view(&painter, rect, params, &pattern);
         } else if gpu_ok && ensure_gpu(app, &ctx, idx, visible_doc_rect(&xf)) {
+            app.stroke_trace.canvas_ready();
             on_gpu = true;
             app.perf.gpu = true;
             // Shadow, checkerboard, document and pixel grid in one custom shader (gpu_canvas.rs).
@@ -2999,6 +3005,9 @@ pub fn canvas_view(app: &mut PhotocraftApp, ui: &mut egui::Ui, idx: usize, rect:
             let rotated = view.rotation.abs() > 0.05;
             let checkerboard = app.session.prefs().transparency_and_gamut.square().map(|square| (checker(app, &ctx), square));
             let tex = ensure_texture(app, &ctx, idx, output).map(|(tex, _scale)| tex);
+            if tex.is_some() {
+                app.stroke_trace.canvas_ready();
+            }
             paint_cpu_document(&painter, &xf, doc.bounds(), rotated, checkerboard, tex);
             for &c in &pattern {
                 paint_cpu_document(&painter, &pattern_xf(&xf, c, size), doc.bounds(), rotated, checkerboard, tex);

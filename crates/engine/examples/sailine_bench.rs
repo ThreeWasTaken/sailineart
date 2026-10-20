@@ -17,6 +17,8 @@ struct Case { paths: usize, points: usize, overlap: bool, width: u32, height: u3
 fn cases(profile: &str) -> Vec<Case> {
     if profile == "quick" {
         return vec![
+            // The latency-sensitive interactive baseline: one short path on a large canvas.
+            Case { paths: 1, points: 3, overlap: false, width: 2048, height: 2048 },
             Case { paths: 10, points: 10, overlap: false, width: 512, height: 512 },
             Case { paths: 10, points: 100, overlap: true, width: 1024, height: 1024 },
         ];
@@ -32,6 +34,10 @@ fn cases(profile: &str) -> Vec<Case> {
 }
 
 fn path_points(case: Case, path: usize) -> Vec<[f64; 2]> {
+    if case.paths == 1 && case.points == 3 {
+        let (w, h) = (case.width as f64, case.height as f64);
+        return vec![[w * 0.12, h * 0.12], [w * 0.37, h * 0.37], [w * 0.62, h * 0.62]];
+    }
     (0..case.points).map(|i| {
         let x = if case.points <= 1 { 0.0 } else { i as f64 * (case.width as f64 - 40.0) / (case.points - 1) as f64 };
         let lane = if case.overlap { 0.0 } else { path as f64 * 8.0 };
