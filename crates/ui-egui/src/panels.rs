@@ -2504,6 +2504,10 @@ fn layers(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
             actions.push(("layer.new.layer".into(), params));
         }
         actions.extend(footer_drop(ui, &new_layer, footer_drag, "layer.duplicate"));
+        let new_linework = icons::button(ui, "sai-curve", 26.0, false, tl!("Create a new Linework layer"));
+        if new_linework.clicked() {
+            actions.push(("layer.new.linework".into(), json!({})));
+        }
         let group = icons::button(ui, "folder", 26.0, false, tl!("Create a new group"));
         if group.clicked() {
             // Like Photoshop a plain click adds an empty group; Shift-click groups the selected

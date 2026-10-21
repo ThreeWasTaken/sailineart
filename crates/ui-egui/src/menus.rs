@@ -2150,6 +2150,26 @@ mod reveal_label_tests {
 }
 
 #[cfg(test)]
+mod linework_layer_menu_tests {
+    use super::*;
+
+    #[test]
+    fn new_linework_layer_menu_item_dispatches_the_engine_command() {
+        let mut app = PhotocraftApp::new(photocraft_engine::Session::new(), crate::Services::default());
+        app.run("file.new", json!({"width": 64, "height": 48})).unwrap();
+        let items = menu_items(&app);
+        let matches: Vec<_> = items.iter().filter(|item| item.id == "layer.new.linework").collect();
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].path, ["Layer", "New"]);
+        assert_eq!(matches[0].label, "New Linework Layer");
+
+        invoke(&mut app, &egui::Context::default(), "layer.new.linework", json!({})).unwrap();
+        let active = app.session.active().unwrap().active_layer.unwrap();
+        assert!(matches!(&app.session.active().unwrap().doc.layer(active).unwrap().content, photocraft_doc::LayerContent::Linework(linework) if linework.paths.is_empty()));
+    }
+}
+
+#[cfg(test)]
 mod window_documents_tests {
     use super::*;
     use serde_json::json;

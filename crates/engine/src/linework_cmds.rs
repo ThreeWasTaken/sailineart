@@ -27,6 +27,7 @@ const COLOR_CMD: &str = "linework.setPathColor";
 const POINTED_CMD: &str = "linework.setPointPointed";
 const COMBINE_CMD: &str = "linework.combinePaths";
 const INTERPOLATION_CMD: &str = "linework.setInterpolation";
+const NEW_LAYER_CMD: &str = "layer.new.linework";
 const MAX_POINTS: usize = 4096;
 
 /// Stages of one Linework cache refresh, available only to the interactive latency trace.
@@ -1041,8 +1042,29 @@ fn set_interpolation(s: &mut Session, p: &Value) -> Result<Value> {
     Ok(json!({"interpolation": model.id()}))
 }
 
+fn new_layer(s: &mut Session, _p: &Value) -> Result<Value> {
+    let id = s.edit("New Linework Layer", |doc, active| {
+        let name = doc.next_layer_name("Linework");
+        let id = doc.insert_above(*active, Layer::new(name, LayerContent::Linework(LineworkLayer::default())));
+        *active = Some(id);
+        Ok(id)
+    })?;
+    crate::layer_multi_cmds::note_inert_insert(s, id);
+    Ok(json!({"layer": id.0}))
+}
+
 pub fn specs() -> Vec<CommandSpec> {
     vec![
+        CommandSpec {
+            id: NEW_LAYER_CMD,
+            label: "New Linework Layer",
+            menu: &["Layer", "New"],
+            shortcut: None,
+            params: "{} → {layer}",
+            enabled: has_doc,
+            run: new_layer,
+            journal: true,
+        },
         CommandSpec {
             id: INTERPOLATION_CMD,
             label: "Preview Linework Interpolation",
@@ -1189,6 +1211,31 @@ pub fn specs() -> Vec<CommandSpec> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn new_linework_layer_inserts_above_selected_linework_and_undoes_redoes() {
+        let mut session = Session::new();
+        session.execute("file.new", json!({"width":64,"height":64})).unwrap();
+        let existing = session.execute("linework.create", json!({"points":[[4,8],[32,40]]})).unwrap();
+        let existing_id = photocraft_doc::LayerId(existing["layer"].as_u64().unwrap());
+        let created = session.execute(NEW_LAYER_CMD, json!({})).unwrap();
+        let linework_id = photocraft_doc::LayerId(created["layer"].as_u64().unwrap());
+        let state = session.active().unwrap();
+        assert_eq!(state.active_layer, Some(linework_id));
+        let linework = state.doc.layer(linework_id).unwrap();
+        assert_eq!(linework.name, "Linework 2");
+        assert!(matches!(&linework.content, LayerContent::Linework(linework) if linework.paths.is_empty()));
+        let layers = &state.doc.layers;
+        let existing_index = layers.iter().position(|layer| layer.id == existing_id).unwrap();
+        assert_eq!(layers.get(existing_index + 1).map(|layer| layer.id), Some(linework_id));
+
+        assert!(session.undo());
+        assert_eq!(session.active().unwrap().active_layer, Some(existing_id));
+        assert!(session.active().unwrap().doc.layer(linework_id).is_none());
+        assert!(session.redo());
+        assert_eq!(session.active().unwrap().active_layer, Some(linework_id));
+        assert!(session.active().unwrap().doc.layer(linework_id).is_some());
+    }
 
     #[test]
     fn one_path_cache_matches_compact_composition_and_reports_exact_pixel_damage() {
