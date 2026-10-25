@@ -189,6 +189,9 @@ pub fn down_with_mods(app: &mut PhotocraftApp, point: [f64; 2], mods: Modifiers)
         return;
     }
     if app.ui.sailine.is_none()
+        // SaiCurve is click-to-create: with no modifier its anchors are hidden, so a plain click
+        // over their stored coordinates starts a new curve instead of selecting invisible data.
+        && (app.ui.tool != Tool::SaiCurve || mods.shift || mods.alt || mods.ctrl || mods.command)
         && let Some((layer, path, point_id)) = nearest_point(app, point)
     {
         if mods.alt {
@@ -675,18 +678,43 @@ pub(crate) fn nearest_point(app: &PhotocraftApp, point: [f64; 2]) -> Option<(Lay
     let state = app.session.active()?;
     let layer_id = state.active_layer?;
     let layer = state.doc.layer(layer_id)?;
+    // An invisible or fully masked anchor cannot own the click. In particular, SaiCurve's
+    // unmodified click starts a new stroke at that location; stale point geometry must not
+    // intercept it just because the active layer still contains the point data.
+    let layer_path = state.doc.path_of(layer_id)?;
+    if !state.doc.shown_at(&layer_path) || layer.opacity <= 0.0 {
+        return None;
+    }
     let photocraft_doc::LayerContent::Linework(linework) = &layer.content else { return None };
     let tolerance = 8.0 / f64::from(app.point_zoom().max(0.01));
-    linework
+    let (_, path, id, anchor) = linework
         .paths
         .iter()
         .flat_map(|path| path.points.iter().map(move |p| (path.id, p.id, p.position)))
-        .filter_map(|(path, id, position)| {
-            let distance = (position[0] - point[0]).hypot(position[1] - point[1]);
-            (distance <= tolerance).then_some((distance, path, id))
+        .filter_map(|(path, id, anchor)| {
+            let distance = (anchor[0] - point[0]).hypot(anchor[1] - point[1]);
+            (distance <= tolerance).then_some((distance, path, id, anchor))
         })
         .min_by(|a, b| a.0.total_cmp(&b.0))
-        .map(|(_, path, id)| (layer_id, path, id))
+        ?;
+    // Check coverage at the anchor itself, not at the cursor. A cursor a few pixels outside a
+    // mask boundary can still be within the screen-space hit radius of an anchor hidden by it.
+    let x = anchor[0].floor() as i32;
+    let y = anchor[1].floor() as i32;
+    for depth in 1..=layer_path.len() {
+        let ancestor_path = layer_path.get(..depth)?;
+        let ancestor = state.doc.layer_at(ancestor_path)?;
+        if ancestor.opacity <= 0.0 || ancestor.mask.as_ref().is_some_and(|mask| mask.value(x, y) <= 0.001) {
+            return None;
+        }
+        if let Some(mask) = &ancestor.vector_mask {
+            let coverage = photocraft_vector::vector_mask_values(mask, photocraft_geom::Rect::new(x, y, x.saturating_add(1), y.saturating_add(1)));
+            if coverage.first().is_none_or(|value| *value <= 0.001) {
+                return None;
+            }
+        }
+    }
+    Some((layer_id, path, id))
 }
 
 fn point_position(app: &PhotocraftApp, selection: Selection) -> Option<[f64; 2]> {
@@ -1675,7 +1703,7 @@ mod tests {
     fn shift_selects_multiple_points_and_ctrl_drag_moves_them_together() {
         let mut app = app();
         app.run("linework.create", json!({"points": [[20.0, 30.0], [100.0, 140.0], [170.0, 40.0]], "width": 3.0})).unwrap();
-        down_with_mods(&mut app, [20.0, 30.0], Modifiers::NONE);
+        down_with_mods(&mut app, [20.0, 30.0], Modifiers::SHIFT);
         down_with_mods(&mut app, [100.0, 140.0], Modifiers::SHIFT);
         assert_eq!(app.ui.sailine_selections.len(), 2);
         let journal_before = app.session.journal.len();
@@ -1760,8 +1788,10 @@ mod tests {
             let layer = app.session.active().unwrap().doc.layer(app.session.active().unwrap().active_layer.unwrap()).unwrap();
             let photocraft_doc::LayerContent::Linework(linework) = &layer.content else { panic!("linework expected") };
             assert_eq!(linework.paths[0].points[1].position, [inserted[0] + 12.0, inserted[1] + 9.0], "Ctrl+drag moves the inserted point on both tools");
-            tool_event(&mut app, ToolEvent::Down { x: 20.0, y: 50.0, pressure: 1.0 }, Modifiers::NONE);
-            tool_event(&mut app, ToolEvent::Up { x: 20.0, y: 50.0 }, Modifiers::NONE);
+            if tool == Tool::SaiPressure {
+                tool_event(&mut app, ToolEvent::Down { x: 20.0, y: 50.0, pressure: 1.0 }, Modifiers::NONE);
+                tool_event(&mut app, ToolEvent::Up { x: 20.0, y: 50.0 }, Modifiers::NONE);
+            }
             tool_event(&mut app, ToolEvent::Down { x: 180.0, y: 50.0, pressure: 1.0 }, Modifiers::SHIFT);
             tool_event(&mut app, ToolEvent::Up { x: 180.0, y: 50.0 }, Modifiers::SHIFT);
             assert_eq!(app.ui.sailine_selections.len(), 2, "Shift-click selection should also match on both tools");
@@ -2112,7 +2142,7 @@ mod tests {
             photocraft_doc::LayerContent::Linework(linework) => linework.paths[0].points.iter().map(|point| point.id).collect(),
             _ => panic!("linework expected"),
         };
-        down_with_mods(&mut app, [170.0, 40.0], Modifiers::NONE);
+        down_with_mods(&mut app, [170.0, 40.0], Modifiers::SHIFT);
         assert_eq!(app.ui.sailine_selections.len(), 1);
 
         tool_down(&mut app, [0.0, 0.0], Modifiers::SHIFT);
@@ -2153,7 +2183,7 @@ mod tests {
     fn new_draft_clears_previous_point_selection() {
         let mut app = app();
         app.run("linework.create", json!({"points": [[20.0, 30.0], [100.0, 140.0]], "width": 3.0})).unwrap();
-        down_with_mods(&mut app, [20.0, 30.0], Modifiers::NONE);
+        down_with_mods(&mut app, [20.0, 30.0], Modifiers::SHIFT);
         assert_eq!(app.ui.sailine_selections.len(), 1);
         down_with_mods(&mut app, [180.0, 180.0], Modifiers::NONE);
         assert!(app.ui.sailine.is_some());
@@ -2162,12 +2192,54 @@ mod tests {
     }
 
     #[test]
+    fn plain_sai_curve_click_starts_a_draft_over_a_hidden_anchor() {
+        let mut app = app();
+        app.run("linework.create", json!({"points": [[20.0, 30.0], [100.0, 140.0]], "width": 3.0})).unwrap();
+        app.hover_doc = Some([20.0, 30.0]);
+
+        down_with_mods(&mut app, [20.0, 30.0], Modifiers::NONE);
+
+        assert_eq!(app.ui.sailine.as_ref().map(|draft| draft.points.as_slice()), Some(&[[20.0, 30.0]][..]));
+        assert!(app.ui.sailine_selections.is_empty());
+    }
+
+    #[test]
+    fn masked_or_hidden_anchor_does_not_block_starting_a_new_draft() {
+        let mut app = app();
+        app.run("linework.create", json!({"points": [[20.0, 30.0], [100.0, 140.0]], "width": 3.0})).unwrap();
+        let layer = app.session.active().unwrap().active_layer.unwrap();
+        {
+            let state = app.session.active_mut().unwrap();
+            let doc = std::sync::Arc::make_mut(&mut state.doc);
+            let mut mask = photocraft_doc::LayerMask::hide_all();
+            // The cursor is within the point's hit radius but outside the masked anchor.
+            mask.surface.fill_rect(photocraft_geom::Rect::from_xywh(25, 29, 3, 3), &[1.0]);
+            doc.layer_mut(layer).unwrap().mask = Some(mask);
+        }
+
+        assert!(nearest_point(&app, [26.0, 30.0]).is_none(), "a visible cursor must not hit an anchor hidden by the mask");
+        down_with_mods(&mut app, [26.0, 30.0], Modifiers::NONE);
+        assert_eq!(app.ui.sailine.as_ref().map(|draft| draft.points.as_slice()), Some(&[[26.0, 30.0]][..]));
+        assert!(app.ui.sailine_selections.is_empty());
+
+        app.ui.sailine = None;
+        {
+            let state = app.session.active_mut().unwrap();
+            let doc = std::sync::Arc::make_mut(&mut state.doc);
+            doc.layer_mut(layer).unwrap().visible = false;
+        }
+        assert!(nearest_point(&app, [20.0, 30.0]).is_none(), "a hidden layer anchor is not a hit target");
+        down_with_mods(&mut app, [20.0, 30.0], Modifiers::NONE);
+        assert!(app.ui.sailine.is_some());
+    }
+
+    #[test]
     fn delete_key_removes_multi_selection_in_one_undo_step_on_both_tools() {
         for tool in [Tool::SaiCurve, Tool::SaiPressure] {
             let mut app = app();
             app.run("linework.create", json!({"points": [[20.0, 30.0], [100.0, 140.0], [170.0, 40.0]], "width": 3.0})).unwrap();
             app.ui.tool = tool;
-            down_with_mods(&mut app, [20.0, 30.0], Modifiers::NONE);
+            down_with_mods(&mut app, [20.0, 30.0], Modifiers::SHIFT);
             down_with_mods(&mut app, [100.0, 140.0], Modifiers::SHIFT);
             assert_eq!(app.ui.sailine_selections.len(), 2);
             let history = app.session.active().unwrap().history.entries().len();
